@@ -1,0 +1,288 @@
+# ======================================================================================
+# Jarvis - cấu hình chính
+# --------------------------------------------------------------------------------------
+# Đường dẫn tương đối được tính từ thư mục chứa file này.
+# Muốn tùy chỉnh riêng cho máy mình mà không sửa file này: tạo `config.local.yaml`
+# (đã git-ignore) với đúng cấu trúc, nó sẽ được merge chồng lên.
+# ======================================================================================
+
+# --------------------------------------------------------------------------------------
+# STT - hynt/Zipformer-30M-RNNT-6000h qua sherpa-onnx (offline transducer)
+# Chạy `python scripts/download_models.py` để tải model.
+# Đổi sang bản `.int8.onnx` cho encoder nếu muốn nhanh hơn / nhẹ RAM hơn.
+# --------------------------------------------------------------------------------------
+stt:
+  encoder: models/stt/zipformer-30m-rnnt-6000h/encoder-epoch-20-avg-10.int8.onnx
+  decoder: models/stt/zipformer-30m-rnnt-6000h/decoder-epoch-20-avg-10.onnx
+  joiner: models/stt/zipformer-30m-rnnt-6000h/joiner-epoch-20-avg-10.int8.onnx
+  tokens: models/stt/zipformer-30m-rnnt-6000h/tokens.txt
+  provider: cpu            # cpu | cuda (cuda cần sherpa-onnx build GPU, xem README)
+  num_threads: 4
+  decoding_method: greedy_search
+  sample_rate: 16000
+  feature_dim: 80
+  lowercase_output: true   # model xuất chữ IN HOA -> hạ về chữ thường cho LLM
+
+# --------------------------------------------------------------------------------------
+# TTS - VITS/Piper tiếng Việt qua sherpa-onnx
+# Giọng khác: vits-piper-vi_VN-vivos-x_low (nhẹ), vits-piper-vi_VN-25hours_single-low
+# --------------------------------------------------------------------------------------
+tts:
+  model: models/tts/vits-piper-vi_VN-vais1000-medium/vi_VN-vais1000-medium.onnx
+  tokens: models/tts/vits-piper-vi_VN-vais1000-medium/tokens.txt
+  data_dir: models/tts/vits-piper-vi_VN-vais1000-medium/espeak-ng-data
+  provider: cpu
+  num_threads: 2
+  speaker_id: 0
+  speed: 1.0
+  max_num_sentences: 1
+
+# --------------------------------------------------------------------------------------
+# LLM - LM Studio chạy local (bật Local Server trong LM Studio, mặc định port 1234)
+# `model` là model key, xem bằng `lms ls` hoặc trong tab Developer của LM Studio.
+# 4GB VRAM: nên dùng model 3B quantized Q4_K_M.
+# --------------------------------------------------------------------------------------
+llm:
+  api_host: localhost:1234
+  model: qwen2.5-3b-instruct
+  temperature: 0.4
+  max_tokens: 512
+  context_length: 4096
+  max_tool_rounds: 6
+  request_timeout_s: 180
+  history_turns: 6
+
+# --------------------------------------------------------------------------------------
+# Wake word - openWakeWord
+# --------------------------------------------------------------------------------------
+wake_word:
+  enabled: true
+  model: hey_jarvis
+  threshold: 0.5           # tăng lên 0.6-0.7 nếu bị kích hoạt sai
+  inference_framework: onnx
+  refractory_seconds: 2.0
+
+# --------------------------------------------------------------------------------------
+# Audio - mic & loa
+# input_device/output_device: null = mặc định hệ thống, hoặc số index,
+# hoặc một phần tên thiết bị (ví dụ "Microphone Array").
+# Xem danh sách: `python -m jarvis devices`
+# --------------------------------------------------------------------------------------
+audio:
+  input_device: null
+  output_device: null
+  sample_rate: 16000
+  max_record_seconds: 15
+  min_record_seconds: 0.5
+  silence_timeout_ms: 900
+  start_timeout_seconds: 6
+  silence_rms_threshold: null   # null = tự hiệu chuẩn theo tiếng ồn nền
+  calibration_seconds: 1.0
+  calibration_multiplier: 3.0
+  calibration_floor_minimum: 0.006
+  pre_roll_ms: 300
+  beep_on_listen: true
+
+# --------------------------------------------------------------------------------------
+# Tools mà LLM được phép gọi
+# --------------------------------------------------------------------------------------
+tools:
+  # ---- Lệnh hệ thống: CHỈ chạy được những lệnh liệt kê dưới đây ----------------------
+  shell:
+    enabled: true
+    whitelist:
+      - name: open_downloads
+        description: "Mở thư mục Downloads trong File Explorer."
+        executable: explorer.exe
+        args: ["%USERPROFILE%\\Downloads"]
+
+      - name: open_documents
+        description: "Mở thư mục Documents (Tài liệu) trong File Explorer."
+        executable: explorer.exe
+        args: ["%USERPROFILE%\\Documents"]
+
+      - name: open_desktop
+        description: "Mở thư mục Desktop trong File Explorer."
+        executable: explorer.exe
+        args: ["%USERPROFILE%\\Desktop"]
+
+      - name: open_recycle_bin
+        description: "Mở Thùng rác (Recycle Bin)."
+        executable: explorer.exe
+        args: ["shell:RecycleBinFolder"]
+
+      - name: system_info
+        description: "Xem thông tin hệ thống: tên máy, phiên bản Windows, CPU, RAM."
+        executable: powershell.exe
+        use_powershell: true
+        args:
+          - "$os = Get-CimInstance Win32_OperatingSystem;
+             $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1;
+             'May: ' + $env:COMPUTERNAME + '; Windows: ' + $os.Caption + ' ' + $os.Version +
+             '; CPU: ' + $cpu.Name +
+             '; RAM tong: ' + [math]::Round($os.TotalVisibleMemorySize/1MB,1) + ' GB' +
+             '; RAM con trong: ' + [math]::Round($os.FreePhysicalMemory/1MB,1) + ' GB'"
+        timeout_s: 30
+
+      - name: disk_space
+        description: "Xem dung lượng trống còn lại của các ổ đĩa."
+        executable: powershell.exe
+        use_powershell: true
+        args:
+          - "Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' |
+             ForEach-Object { $_.DeviceID + ' con trong ' +
+             [math]::Round($_.FreeSpace/1GB,1) + ' GB tren tong ' +
+             [math]::Round($_.Size/1GB,1) + ' GB' }"
+        timeout_s: 30
+
+      - name: battery_status
+        description: "Xem phần trăm pin còn lại của laptop."
+        executable: powershell.exe
+        use_powershell: true
+        args:
+          - "$b = Get-CimInstance Win32_Battery | Select-Object -First 1;
+             if ($b) { 'Pin con ' + $b.EstimatedChargeRemaining + ' phan tram' }
+             else { 'Khong tim thay pin' }"
+        timeout_s: 30
+
+      - name: network_info
+        description: "Xem địa chỉ IP nội bộ và trạng thái kết nối mạng."
+        executable: powershell.exe
+        use_powershell: true
+        args:
+          - "Get-NetIPAddress -AddressFamily IPv4 |
+             Where-Object { $_.IPAddress -ne '127.0.0.1' } |
+             ForEach-Object { $_.InterfaceAlias + ': ' + $_.IPAddress }"
+        timeout_s: 30
+
+      - name: current_datetime
+        description: "Xem ngày giờ hiện tại của máy."
+        executable: powershell.exe
+        use_powershell: true
+        args: ["Get-Date -Format 'dddd, dd/MM/yyyy HH:mm'"]
+        timeout_s: 15
+
+      - name: running_apps
+        description: "Liệt kê các ứng dụng đang chạy chiếm nhiều RAM nhất."
+        executable: powershell.exe
+        use_powershell: true
+        args:
+          - "Get-Process | Where-Object { $_.MainWindowTitle } |
+             Sort-Object WorkingSet64 -Descending | Select-Object -First 8 |
+             ForEach-Object { $_.ProcessName + ' (' +
+             [math]::Round($_.WorkingSet64/1MB) + ' MB)' }"
+        timeout_s: 30
+
+      - name: lock_screen
+        description: "Khoá màn hình Windows ngay lập tức."
+        executable: rundll32.exe
+        args: ["user32.dll,LockWorkStation"]
+
+      - name: open_folder
+        description: >
+          Mở một thư mục cụ thể theo đường dẫn. Tham số là đường dẫn thư mục,
+          ví dụ D:\\Projects hoặc C:\\Users\\me\\Music.
+        executable: explorer.exe
+        allow_argument: true
+        argument_pattern: "^[A-Za-z]:\\\\[\\w\\s\\-.\\\\()]{0,150}$"
+        argument_args: ["{arg}"]
+
+  # ---- Mở app / trang web theo alias ------------------------------------------------
+  apps:
+    enabled: true
+    aliases:
+      spotify:
+        kind: uri
+        target: "spotify:"
+        description: "Ứng dụng nhạc Spotify"
+      nhac:
+        kind: uri
+        target: "spotify:"
+        description: "Nghe nhạc (Spotify)"
+      youtube:
+        kind: url
+        target: "https://www.youtube.com"
+        description: "YouTube"
+      facebook:
+        kind: url
+        target: "https://www.facebook.com"
+        description: "Facebook"
+      messenger:
+        kind: url
+        target: "https://www.messenger.com"
+        description: "Messenger"
+      gmail:
+        kind: url
+        target: "https://mail.google.com"
+        description: "Gmail"
+      chatgpt:
+        kind: url
+        target: "https://chat.openai.com"
+        description: "ChatGPT trên web"
+      notepad:
+        kind: exe
+        target: "notepad.exe"
+        description: "Notepad"
+      calculator:
+        kind: uri
+        target: "calculator:"
+        description: "Máy tính (Calculator)"
+      may_tinh:
+        kind: uri
+        target: "calculator:"
+        description: "Máy tính (Calculator)"
+      settings:
+        kind: uri
+        target: "ms-settings:"
+        description: "Cài đặt Windows"
+      task_manager:
+        kind: exe
+        target: "taskmgr.exe"
+        description: "Task Manager"
+      vscode:
+        kind: exe
+        target: "code"
+        description: "Visual Studio Code"
+      chrome:
+        kind: exe
+        target: "chrome.exe"
+        description: "Google Chrome"
+      edge:
+        kind: uri
+        target: "microsoft-edge:"
+        description: "Microsoft Edge"
+
+  # ---- Media keys / âm lượng (PyAutoGUI) --------------------------------------------
+  media:
+    enabled: true
+    volume_step: 4
+
+  # ---- Web search -------------------------------------------------------------------
+  web_search:
+    enabled: true
+    backend: duckduckgo      # duckduckgo | searxng
+    searxng_url: null        # ví dụ http://localhost:8080 nếu tự host SearxNG
+    max_results: 5
+    timeout_s: 15
+    region: vn-vi
+
+  # ---- browser-use (tùy chọn, nặng) -------------------------------------------------
+  # Bật sau khi đã: pip install -r requirements-browser.txt && playwright install chromium
+  browser_use:
+    enabled: false
+    model: null              # null = dùng chung model với llm.model
+    headless: false
+    max_steps: 15
+    timeout_s: 180
+    use_vision: false
+
+# --------------------------------------------------------------------------------------
+tray:
+  enabled: true
+  title: Jarvis
+
+logging:
+  level: INFO
+  file: logs/jarvis.log
+  max_bytes: 2000000
+  backup_count: 3

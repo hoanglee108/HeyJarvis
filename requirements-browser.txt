@@ -1,0 +1,6 @@
+# Optional browser automation only. Install this file separately from requirements.txt.
+# These pinned versions use the legacy langchain_openai ChatOpenAI import supported
+# by jarvis.tools.browser; browser automation remains disabled by default.
+browser-use==0.1.40
+langchain-openai==0.3.3
+playwright==1.51.0

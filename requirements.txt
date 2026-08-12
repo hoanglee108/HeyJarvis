@@ -1,0 +1,33 @@
+# Core runtime deps for Jarvis (Windows, Python 3.11)
+# Pinned to keep the local-first stack reproducible.
+
+# --- config / validation ---
+pydantic==2.11.7
+PyYAML==6.0.2
+
+# --- audio I/O ---
+sounddevice==0.5.1
+soundfile==0.13.1
+numpy==1.26.4
+
+# --- STT + TTS runtime (Zipformer RNNT + VITS/Piper) ---
+sherpa-onnx==1.12.40
+
+# --- wake word ---
+openwakeword==0.6.0
+onnxruntime==1.20.1
+
+# --- LLM (LM Studio local) ---
+lmstudio==1.5.0
+
+# --- system tray ---
+pystray==0.19.5
+Pillow==11.1.0
+
+# --- desktop automation / media keys ---
+PyAutoGUI==0.9.54
+
+# --- web search ---
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.3.0
