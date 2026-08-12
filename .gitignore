@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
-
+structure.md
 # Downloaded model weights (hundreds of MB) - fetch with scripts/download_models.py
 models/
 logs/

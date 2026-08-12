@@ -80,11 +80,17 @@ class TtsConfig(_Base):
 class WakeWordConfig(_Base):
     enabled: bool = True
     #: openWakeWord pretrained name (``hey_jarvis``) or a path to a custom ``.onnx`` model.
+    #: Used only when ``stt_phrase`` is unset.
     model: str = "hey_jarvis"
+    #: Recognise this wake phrase with the local STT instead of an openWakeWord model.
+    #: This supports phrases such as Vietnamese ``Xin chào`` without a custom ONNX model.
+    stt_phrase: str | None = None
     threshold: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.5
     inference_framework: Literal["onnx", "tflite"] = "onnx"
     #: Ignore further detections for this long after a trigger (debounce).
     refractory_seconds: Annotated[float, Field(ge=0.0)] = 2.0
+    #: Phrases that return a hands-free conversation to wake-word standby.
+    conversation_end_phrases: list[str] = Field(default_factory=lambda: ["goodbye", "good bye"])
     #: openWakeWord expects 80 ms frames of 16 kHz int16 audio.
     frame_samples: Literal[1280] = 1280
     enable_speex_noise_suppression: bool = False

@@ -7,8 +7,10 @@ degrades into a spoken apology instead of killing the process.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +45,7 @@ class TurnResult:
     tools_used: list[str] = field(default_factory=list)
     error: str | None = None
     spoken: bool = False
+    conversation_ended: bool = False
 
     @property
     def ok(self) -> bool:
@@ -75,7 +78,11 @@ class Pipeline:
         self.state.set(State.STARTING, "đang nạp model")
         self.stt.load()
         self.tts.load()
-        if include_wake and self.config.wake_word.enabled:
+        if (
+            include_wake
+            and self.config.wake_word.enabled
+            and self.config.wake_word.stt_phrase is None
+        ):
             self.wake.load()
         if include_llm:
             try:
@@ -106,8 +113,12 @@ class Pipeline:
     # ----------------------------------------------------------------------------
     # speaking helpers
     # ----------------------------------------------------------------------------
-    def say(self, text: str) -> bool:
-        """Speak ``text``; returns False when synthesis/playback failed."""
+    def say(self, text: str, *, resume_state: State | None = None) -> bool:
+        """Speak ``text``; returns False when synthesis/playback failed.
+
+        ``resume_state`` keeps a hands-free conversation active after playback
+        instead of returning to wake-word standby.
+        """
         if not text.strip():
             return False
         previous = self.state.state
@@ -121,9 +132,12 @@ class Pipeline:
             print(f"[Jarvis] {text}")  # last-resort feedback channel
             return False
         finally:
-            # Keep an ERROR indication visible; otherwise go back to waiting.
+            # Keep an ERROR indication visible; otherwise restore the requested
+            # conversation state or go back to ordinary wake-word standby.
             if previous is State.ERROR:
                 self.state.set(State.ERROR, previous_detail)
+            elif resume_state is not None:
+                self.state.set(resume_state)
             elif previous is not State.SPEAKING:
                 self.state.set(State.IDLE)
             # Discard the audio the microphone picked up from our own voice.
@@ -135,9 +149,10 @@ class Pipeline:
     # ----------------------------------------------------------------------------
     # one turn
     # ----------------------------------------------------------------------------
-    def respond_to_text(self, text: str) -> TurnResult:
+    def respond_to_text(self, text: str, *, keep_listening: bool = False) -> TurnResult:
         """LLM (with tools) -> spoken reply. Used by both voice and ``jarvis chat``."""
         result = TurnResult(transcript=text)
+        resume_state = State.LISTENING if keep_listening else None
         self.state.set(State.THINKING, text[:60])
         self.tools.reset_usage()
 
@@ -150,45 +165,97 @@ class Pipeline:
             log.error("LM Studio không khả dụng: %s", exc)
             result.error = str(exc)
             self.state.set(State.ERROR, "LM Studio offline")
-            result.spoken = self.say(self.config.replies.llm_unavailable)
+            result.spoken = self.say(self.config.replies.llm_unavailable, resume_state=resume_state)
             return result
         except LlmError as exc:
             log.error("Lỗi LLM: %s", exc)
             result.error = str(exc)
             self.state.set(State.ERROR, "lỗi LLM")
-            result.spoken = self.say(self.config.replies.generic_error)
+            result.spoken = self.say(self.config.replies.generic_error, resume_state=resume_state)
             return result
 
         result.tools_used = list(self.tools.last_used)
         if not reply:
             result.error = "LLM trả về nội dung rỗng"
-            result.spoken = self.say(self.config.replies.generic_error)
+            result.spoken = self.say(self.config.replies.generic_error, resume_state=resume_state)
             return result
 
         result.reply = reply
-        result.spoken = self.say(reply)
-        self.state.set(State.IDLE)
+        result.spoken = self.say(reply, resume_state=resume_state)
+        if not keep_listening:
+            self.state.set(State.IDLE)
         return result
 
-    def process_audio(self, samples: np.ndarray, sample_rate: int | None = None) -> TurnResult:
-        """Transcribe an utterance and answer it."""
+    @staticmethod
+    def _normalise_phrase(text: str) -> str:
+        """Case-fold text, remove accents/punctuation, and collapse whitespace."""
+        decomposed = unicodedata.normalize("NFD", text.casefold())
+        accentless = "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
+        return " ".join(re.sub(r"[^\w]+", " ", accentless).split())
+
+    def _matches_phrase(self, transcript: str, phrases: list[str] | tuple[str, ...]) -> bool:
+        normalised = self._normalise_phrase(transcript)
+        for phrase in phrases:
+            candidate = self._normalise_phrase(phrase)
+            if candidate and re.search(rf"(?:^|\s){re.escape(candidate)}(?:$|\s)", normalised):
+                return True
+        return False
+
+    def _is_conversation_end(self, transcript: str) -> bool:
+        return self._matches_phrase(transcript, self.config.wake_word.conversation_end_phrases)
+
+    @property
+    def _wake_phrase(self) -> str:
+        return self.config.wake_word.stt_phrase or "Hey Jarvis"
+
+    def _waiting_message(self, *, include_exit_hint: bool = False) -> str:
+        suffix = " (Ctrl+C để thoát)" if include_exit_hint else ""
+        return f"Đang chờ '{self._wake_phrase}'…{suffix}"
+
+    def process_audio(
+        self,
+        samples: np.ndarray,
+        sample_rate: int | None = None,
+        *,
+        keep_listening: bool = False,
+    ) -> TurnResult:
+        """Transcribe an utterance and answer it.
+
+        In a hands-free conversation, the configured end phrase bypasses the LLM
+        and ends the session; all other turns leave the microphone listening for
+        the next one.
+        """
+        resume_state = State.LISTENING if keep_listening else None
         self.state.set(State.THINKING, "đang nhận dạng")
         try:
             transcript = self.stt.transcribe(samples, sample_rate)
         except SttError as exc:
             log.error("Lỗi STT: %s", exc)
             self.state.set(State.ERROR, "lỗi STT")
-            spoken = self.say(self.config.replies.generic_error)
+            spoken = self.say(self.config.replies.generic_error, resume_state=resume_state)
             return TurnResult(error=str(exc), spoken=spoken)
 
         if not transcript or len(transcript) < 2:
             log.info("Không nhận được nội dung nào")
-            spoken = self.say(self.config.replies.not_understood)
-            self.state.set(State.IDLE)
+            spoken = self.say(self.config.replies.not_understood, resume_state=resume_state)
+            if not keep_listening:
+                self.state.set(State.IDLE)
             return TurnResult(error="transcript rỗng", spoken=spoken)
 
         print(f"Bạn: {transcript}")
-        result = self.respond_to_text(transcript)
+        if keep_listening and self._is_conversation_end(transcript):
+            goodbye = "Tạm biệt."
+            log.info("Kết thúc phiên hội thoại qua câu lệnh: %r", transcript)
+            result = TurnResult(
+                transcript=transcript,
+                reply=goodbye,
+                spoken=self.say(goodbye),
+                conversation_ended=True,
+            )
+            print(f"Jarvis: {goodbye}")
+            return result
+
+        result = self.respond_to_text(transcript, keep_listening=keep_listening)
         if result.reply:
             print(f"Jarvis: {result.reply}")
         return result
@@ -203,8 +270,17 @@ class Pipeline:
     # ----------------------------------------------------------------------------
     # recording
     # ----------------------------------------------------------------------------
-    def _capture(self, *, use_pre_roll: bool) -> np.ndarray | None:
-        """Record one utterance; ``None`` when nobody spoke."""
+    def _capture(
+        self,
+        *,
+        use_pre_roll: bool,
+        prompt_on_no_speech: bool = True,
+    ) -> np.ndarray | None:
+        """Record one utterance; ``None`` when nobody spoke.
+
+        A continuous conversation keeps listening silently when the user pauses;
+        ordinary wake-word mode retains the existing spoken retry prompt.
+        """
         self.state.set(State.LISTENING)
         if self.config.audio.beep_on_listen:
             self.speaker.beep()
@@ -218,9 +294,12 @@ class Pipeline:
             pre_roll=pre_roll,
         )
         if recording.reason == "no_speech":
-            log.info("Không có ai nói, quay lại chờ")
-            self.say(self.config.replies.not_understood)
-            self.state.set(State.IDLE)
+            if prompt_on_no_speech:
+                log.info("Không có ai nói, quay lại chờ")
+                self.say(self.config.replies.not_understood)
+                self.state.set(State.IDLE)
+            else:
+                log.info("Không có ai nói, vẫn giữ phiên hội thoại")
             return None
         if recording.reason == "mic_timeout":
             log.error("Mic không trả về dữ liệu")
@@ -265,14 +344,91 @@ class Pipeline:
             self.state.set(State.IDLE, "nhấn Enter để nói")
             print("\nNhấn Enter để nói tiếp.")
 
+    def _run_conversation(self) -> None:
+        """Keep serving turns after a wake word until the configured end phrase."""
+        end_phrases = ", ".join(repr(phrase) for phrase in self.config.wake_word.conversation_end_phrases)
+        print(f"Đang nghe. Nói {end_phrases} để quay lại chế độ chờ.")
+        use_pre_roll = True
+
+        while not self.stopping:
+            try:
+                samples = self._capture(
+                    use_pre_roll=use_pre_roll,
+                    prompt_on_no_speech=False,
+                )
+            except AudioError as exc:
+                log.error("Lỗi mic khi ghi âm: %s", exc)
+                self.say(self.config.replies.mic_error, resume_state=State.LISTENING)
+                self._restart_mic()
+                use_pre_roll = False
+                continue
+
+            use_pre_roll = False
+            if samples is None:
+                continue
+
+            result = self.process_audio(samples, keep_listening=True)
+            if not result.conversation_ended:
+                continue
+
+            self.state.set(State.IDLE)
+            self.wake.reset()
+            self.mic.drain()
+            print(self._waiting_message())
+            return
+
+    def _run_stt_phrase_wake(self) -> None:
+        """Wait for an STT-recognised wake phrase such as ``Xin chào``.
+
+        This is intentionally separate from openWakeWord: arbitrary text cannot
+        be used as an openWakeWord model name without supplying a trained ONNX
+        model. The trade-off is that activation happens after the phrase ends.
+        """
+        phrase = self.config.wake_word.stt_phrase
+        assert phrase is not None
+        print(f"\n{self._waiting_message(include_exit_hint=True)}")
+
+        while not self.stopping:
+            try:
+                samples = self._capture(use_pre_roll=False, prompt_on_no_speech=False)
+            except AudioError as exc:
+                log.error("Lỗi mic khi chờ câu đánh thức: %s", exc)
+                self.say(self.config.replies.mic_error)
+                self._restart_mic()
+                continue
+
+            if samples is None:
+                continue
+
+            self.state.set(State.THINKING, "đang nhận dạng câu đánh thức")
+            try:
+                transcript = self.stt.transcribe(samples)
+            except SttError as exc:
+                log.error("Lỗi STT khi chờ câu đánh thức: %s", exc)
+                self.state.set(State.ERROR, "lỗi STT")
+                continue
+
+            if not self._matches_phrase(transcript, [phrase]):
+                log.debug("Chưa nghe câu đánh thức: %r", transcript)
+                self.state.set(State.IDLE, f"đang chờ '{phrase}'")
+                continue
+
+            log.info("Đã nghe câu đánh thức %r: %r", phrase, transcript)
+            self.mic.drain()
+            self._run_conversation()
+
     def run_hands_free(self) -> None:
-        """Task 6 loop: always listening for 'Hey Jarvis'."""
+        """Wait for one configured wake phrase, then converse until the end phrase."""
         self.warmup()
         self._prepare_mic()
         self.say(self.config.replies.startup)
         self.state.set(State.IDLE)
-        print("\nĐang chờ 'Hey Jarvis'… (Ctrl+C để thoát)")
 
+        if self.config.wake_word.stt_phrase is not None:
+            self._run_stt_phrase_wake()
+            return
+
+        print(f"\n{self._waiting_message(include_exit_hint=True)}")
         consecutive_mic_errors = 0
         while not self.stopping:
             frame = self.mic.read(timeout=1.0)
@@ -299,21 +455,9 @@ class Pipeline:
             if not triggered:
                 continue
 
-            try:
-                samples = self._capture(use_pre_roll=True)
-            except AudioError as exc:
-                log.error("Lỗi mic khi ghi âm: %s", exc)
-                self.say(self.config.replies.mic_error)
-                self._restart_mic()
-                continue
-
-            if samples is not None:
-                self.process_audio(samples)
-
-            self.state.set(State.IDLE)
             self.wake.reset()
             self.mic.drain()
-            print("Đang chờ 'Hey Jarvis'…")
+            self._run_conversation()
 
     def _restart_mic(self) -> None:
         log.warning("Khởi động lại micro")

@@ -30,7 +30,7 @@ class State(str, Enum):
 _ALLOWED: dict[State, set[State]] = {
     State.STARTING: {State.IDLE, State.LISTENING, State.THINKING, State.SPEAKING},
     State.IDLE: {State.LISTENING, State.THINKING},
-    State.LISTENING: {State.THINKING, State.IDLE},
+    State.LISTENING: {State.THINKING, State.SPEAKING, State.IDLE},
     State.THINKING: {State.SPEAKING, State.IDLE, State.LISTENING},
     State.SPEAKING: {State.IDLE, State.LISTENING, State.THINKING},
     State.ERROR: {State.IDLE, State.LISTENING, State.THINKING, State.SPEAKING},
@@ -39,7 +39,7 @@ _ALLOWED: dict[State, set[State]] = {
 
 _LABELS: dict[State, str] = {
     State.STARTING: "Đang khởi động…",
-    State.IDLE: "Đang chờ 'Hey Jarvis'",
+    State.IDLE: "Đang chờ lệnh đánh thức",
     State.LISTENING: "Đang nghe…",
     State.THINKING: "Đang xử lý…",
     State.SPEAKING: "Đang nói…",

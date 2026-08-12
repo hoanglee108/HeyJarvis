@@ -6,7 +6,7 @@ Jarvis là trợ lý giọng nói local-first cho Windows: wake word `Hey Jarvis
 
 - **STT offline:** [`hynt/Zipformer-30M-RNNT-6000h`](https://huggingface.co/hynt/Zipformer-30M-RNNT-6000h) qua `sherpa-onnx`.
 - **TTS offline:** VITS/Piper `vi_VN-vais1000-medium` qua `sherpa-onnx`.
-- **Wake word:** openWakeWord `hey_jarvis`.
+- **Wake word:** cụm STT cục bộ `Xin chào` (hoặc model openWakeWord `hey_jarvis` khi cấu hình `stt_phrase: null`).
 - **LLM local:** LM Studio + `qwen2.5-3b-instruct` Q4 (đã phù hợp máy có 4 GB VRAM).
 - **Giao diện:** system tray có trạng thái idle / listening / thinking / speaking.
 - **Tools:** lệnh Windows whitelist, mở ứng dụng qua alias, media keys, DuckDuckGo/SearxNG và browser-use tùy chọn.
@@ -58,7 +58,7 @@ Hoặc trong LM Studio, mở **Developer**, bấm **Start Server** và tải mod
 python -m jarvis doctor
 
 # Chạy đầy đủ: tray + wake word
-python -m jarvis run
+.\.venv\Scripts\python.exe -m jarvis run
 
 # Thay wake word bằng Enter (dễ debug)
 python -m jarvis run --push-to-talk
@@ -107,7 +107,11 @@ Cấu hình mặc định dùng provider `cpu` cho STT/TTS; encoder/joiner Zipfo
 
 ### Wake word
 
-Model có sẵn là `hey_jarvis`. Nếu bị kích hoạt nhầm, tăng `wake_word.threshold` lên khoảng `0.6–0.7`; nếu khó bắt, giảm nhẹ xuống. Để debug mic trước, dùng `run --push-to-talk` thay vì tắt an toàn VAD.
+Cấu hình mặc định nhận câu đánh thức tiếng Việt `Xin chào` bằng STT cục bộ (`wake_word.stt_phrase`). Cách này không đòi model ONNX riêng, nhưng chậm hơn và kém chống nhiễu hơn wake-word model chuyên dụng vì Jarvis phải nhận dạng một câu nói hoàn chỉnh.
+
+Muốn dùng openWakeWord, đặt `wake_word.stt_phrase: null` và giữ `wake_word.model: hey_jarvis`, hoặc cung cấp đường dẫn tới model `.onnx` tùy chỉnh. Với mode openWakeWord, nếu bị kích hoạt nhầm, tăng `wake_word.threshold` lên khoảng `0.6–0.7`; nếu khó bắt, giảm nhẹ xuống. Để debug mic trước, dùng `run --push-to-talk` thay vì tắt an toàn VAD.
+
+Trong cuộc hội thoại, nói `Bái bai` để Jarvis quay lại chờ câu đánh thức. Cấu hình cũng chấp nhận alias STT `ba bai` khi model nhận câu nói không dấu hoặc biến âm.
 
 ## An toàn tools
 

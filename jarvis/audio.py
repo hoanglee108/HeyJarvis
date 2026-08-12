@@ -216,7 +216,10 @@ class MicStream:
             self._overflow_count += 1
             if self._overflow_count % 25 == 1:
                 log.debug("Mic input overflow (%d lần)", self._overflow_count)
-        mono = np.asarray(indata, dtype=np.int16).reshape(-1)
+        # PortAudio reuses ``indata`` for the next callback, so the frame must be
+        # copied. Without this, every queued/ring frame aliases one buffer and the
+        # recorded utterance is overwritten by later audio before it reaches STT.
+        mono = np.array(indata, dtype=np.int16, copy=True).reshape(-1)
         if self._native_rate != self._target_rate:
             resampled = _resample(mono.astype(np.float32), self._native_rate, self._target_rate)
             mono = np.clip(resampled, -INT16_MAX, INT16_MAX - 1).astype(np.int16)

@@ -99,6 +99,24 @@ class SpeechToText:
         return self._recognizer is not None
 
     # -- inference ---------------------------------------------------------------
+    @staticmethod
+    def _boost_quiet_audio(audio: np.ndarray) -> np.ndarray:
+        """Raise a quiet microphone signal to a stable STT input level.
+
+        The VAD has already established that an utterance contains speech. A cap
+        on the gain prevents a near-silent recording from being amplified without
+        bound, while normal-volume recordings are left untouched.
+        """
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        if peak <= 0.0 or peak >= 0.2:
+            return audio
+
+        gain = min(0.2 / peak, 15.0)
+        if gain <= 1.0:
+            return audio
+        log.debug("Khuếch đại âm thanh STT: peak=%.4f, gain=%.1fx", peak, gain)
+        return np.clip(audio * gain, -1.0, 1.0).astype(np.float32, copy=False)
+
     def transcribe(self, samples: np.ndarray, sample_rate: int | None = None) -> str:
         """Transcribe mono audio (float32 in ``[-1,1]`` or int16) to Vietnamese text."""
         self.load()
@@ -106,6 +124,7 @@ class SpeechToText:
         rate = sample_rate or self._config.sample_rate
         if audio.size == 0:
             return ""
+        audio = self._boost_quiet_audio(audio)
 
         started = time.perf_counter()
         with self._lock:

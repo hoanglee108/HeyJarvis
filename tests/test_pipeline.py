@@ -172,7 +172,7 @@ def test_empty_llm_reply_is_reported(pipeline: Pipeline, monkeypatch: pytest.Mon
 def test_capture_returns_samples_when_someone_speaks(pipeline: Pipeline) -> None:
     # 12 speech frames (~1 s) clears min_record_seconds, then enough silence to
     # satisfy silence_timeout_ms from the real config.
-    pipeline.mic = FakeMic([speech_frame()] * 12 + [silence_frame()] * 20)  # type: ignore[assignment]
+    pipeline.mic = FakeMic([speech_frame()] * 12 + [silence_frame()] * 30)  # type: ignore[assignment]
     pipeline._speech_threshold = 0.05  # noqa: SLF001
     samples = pipeline._capture(use_pre_roll=False)  # noqa: SLF001
     assert samples is not None

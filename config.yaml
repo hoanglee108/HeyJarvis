@@ -57,10 +57,15 @@ llm:
 # --------------------------------------------------------------------------------------
 wake_word:
   enabled: true
+  # `Xin chào` được nhận bằng STT cục bộ, không cần model wake-word ONNX tuỳ chỉnh.
+  stt_phrase: "Xin chào"
+  # Chỉ dùng khi `stt_phrase` là null: model openWakeWord có sẵn hoặc đường dẫn .onnx.
   model: hey_jarvis
-  threshold: 0.5           # tăng lên 0.6-0.7 nếu bị kích hoạt sai
+  threshold: 0.5           # áp dụng khi dùng model openWakeWord
   inference_framework: onnx
   refractory_seconds: 2.0
+  # `ba bai` là transcript không dấu/biến âm quan sát được từ STT cho “Bái bai”.
+  conversation_end_phrases: ["Bái bai", "ba bai"]
 
 # --------------------------------------------------------------------------------------
 # Audio - mic & loa
@@ -72,16 +77,18 @@ audio:
   input_device: null
   output_device: null
   sample_rate: 16000
-  max_record_seconds: 15
-  min_record_seconds: 0.5
-  silence_timeout_ms: 900
-  start_timeout_seconds: 6
+  # Dành đủ thời gian nói hết câu sau wake word; VAD vẫn dừng sớm khi im lặng.
+  max_record_seconds: 30
+  min_record_seconds: 0.6
+  silence_timeout_ms: 1800
+  start_timeout_seconds: 10
   silence_rms_threshold: null   # null = tự hiệu chuẩn theo tiếng ồn nền
   calibration_seconds: 1.0
-  calibration_multiplier: 3.0
-  calibration_floor_minimum: 0.006
-  pre_roll_ms: 300
-  beep_on_listen: true
+  calibration_multiplier: 2.0
+  calibration_floor_minimum: 0.003
+  pre_roll_ms: 500
+  # Không phát beep để tránh bỏ lỡ các từ đầu tiên người dùng nói ngay sau wake word.
+  beep_on_listen: false
 
 # --------------------------------------------------------------------------------------
 # Tools mà LLM được phép gọi

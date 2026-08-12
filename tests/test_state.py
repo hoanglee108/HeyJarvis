@@ -13,7 +13,7 @@ def test_full_conversation_cycle_is_valid() -> None:
 
 def test_illegal_transition_is_reported() -> None:
     assert not is_valid_transition(State.IDLE, State.SPEAKING)
-    assert not is_valid_transition(State.LISTENING, State.SPEAKING)
+    assert is_valid_transition(State.LISTENING, State.SPEAKING)
 
 
 def test_error_and_stopped_reachable_from_anywhere() -> None:
