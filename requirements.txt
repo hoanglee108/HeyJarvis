@@ -18,7 +18,9 @@ openwakeword==0.6.0
 onnxruntime==1.20.1
 
 # --- LLM (LM Studio local) ---
-lmstudio==1.5.0
+# Jarvis talks to LM Studio over its OpenAI-compatible REST API using `requests`
+# (listed under web search below), so no vendor SDK is required. That keeps the
+# reasoning/answer split explicit and works with any OpenAI-compatible local server.
 
 # --- system tray ---
 pystray==0.19.5

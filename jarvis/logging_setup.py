@@ -49,7 +49,7 @@ def setup_logging(config: LoggingConfig, *, force: bool = False) -> None:
             root.warning("Không ghi được log ra file %s: %s", log_path, exc)
 
     # Third-party chatter that is not useful at INFO level.
-    for noisy in ("urllib3", "httpx", "httpcore", "websockets", "lmstudio", "PIL", "asyncio"):
+    for noisy in ("urllib3", "httpx", "httpcore", "websockets", "PIL", "asyncio"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     _configured = True

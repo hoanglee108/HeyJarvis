@@ -25,7 +25,8 @@ from .audio import (
     write_wav,
 )
 from .config import JarvisConfig
-from .llm import LLMClient, LlmError, LlmUnavailableError
+from .intents import IntentRouter
+from .llm import LLMClient, LlmError, LlmUnavailableError, ToolSpec
 from .logging_setup import get_logger
 from .state import State, StateMachine
 from .stt import SpeechToText, SttError
@@ -63,12 +64,13 @@ class Pipeline:
         self.tts = TextToSpeech(config.tts, self.speaker)
         self.llm = LLMClient(config.llm)
         self.tools = ToolBox(config)
+        self.intents = IntentRouter(self.tools)
         self.wake = WakeWordDetector(config.wake_word)
         self.mic = MicStream(config.audio)
 
         self._stop_event = threading.Event()
         self._speech_threshold = config.audio.silence_rms_threshold or 0.01
-        self._tool_defs: list[object] | None = None
+        self._tool_defs: list[ToolSpec] | None = None
 
     # ----------------------------------------------------------------------------
     # lifecycle
@@ -150,11 +152,24 @@ class Pipeline:
     # one turn
     # ----------------------------------------------------------------------------
     def respond_to_text(self, text: str, *, keep_listening: bool = False) -> TurnResult:
-        """LLM (with tools) -> spoken reply. Used by both voice and ``jarvis chat``."""
+        """Intent router, else LLM (with tools) -> spoken reply.
+
+        Used by both the voice loop and ``jarvis chat``, so a command answered
+        deterministically behaves identically in either entry point.
+        """
         result = TurnResult(transcript=text)
         resume_state = State.LISTENING if keep_listening else None
         self.state.set(State.THINKING, text[:60])
         self.tools.reset_usage()
+
+        direct = self.intents.route(text)
+        if direct is not None:
+            result.reply = direct.reply
+            result.tools_used = list(self.tools.last_used)
+            result.spoken = self.say(direct.reply, resume_state=resume_state)
+            if not keep_listening:
+                self.state.set(State.IDLE)
+            return result
 
         if self._tool_defs is None:
             self._tool_defs = self.tools.build_tool_defs()
@@ -243,6 +258,7 @@ class Pipeline:
             return TurnResult(error="transcript rỗng", spoken=spoken)
 
         print(f"Bạn: {transcript}")
+
         if keep_listening and self._is_conversation_end(transcript):
             goodbye = "Tạm biệt."
             log.info("Kết thúc phiên hội thoại qua câu lệnh: %r", transcript)

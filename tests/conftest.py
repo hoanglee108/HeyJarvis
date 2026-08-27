@@ -29,6 +29,17 @@ def real_config() -> JarvisConfig:
     return load_config(PROJECT_ROOT / "config.yaml")
 
 
+@pytest.fixture
+def config_copy(real_config: JarvisConfig) -> JarvisConfig:
+    """A per-test deep copy of ``config.yaml``.
+
+    ``real_config`` is session-scoped, so any test that flips a ``tools.*.enabled``
+    flag on it silently changes the behaviour of every test that runs afterwards.
+    Ask for this fixture instead whenever the config is mutated.
+    """
+    return real_config.model_copy(deep=True)
+
+
 @pytest.fixture(scope="session")
 def models_ready(real_config: JarvisConfig) -> bool:
     return not missing_model_files(real_config)

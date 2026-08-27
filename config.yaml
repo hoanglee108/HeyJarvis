@@ -39,18 +39,30 @@ tts:
 
 # --------------------------------------------------------------------------------------
 # LLM - LM Studio chạy local (bật Local Server trong LM Studio, mặc định port 1234)
-# `model` là model key, xem bằng `lms ls` hoặc trong tab Developer của LM Studio.
-# 4GB VRAM: nên dùng model 3B quantized Q4_K_M.
+# Jarvis nói chuyện với LM Studio qua REST OpenAI-compatible (http://<api_host>/v1),
+# nên bất kỳ server tương thích nào cũng chạy được.
+#
+# `model` là model key, xem bằng `lms ls`. Nạp model: `lms load nvidia/nemotron-3-nano-4b`
+#
+# nvidia/nemotron-3-nano-4b là model *reasoning*: nó luôn sinh một khối <think> trước
+# khi trả lời. Hệ quả cần biết:
+#   - max_tokens phải rộng, vì phần suy luận cũng tiêu tokens. 512 là quá chật.
+#   - phần suy luận bằng tiếng Anh KHÔNG bao giờ được đọc ra loa; jarvis/llm.py lấy
+#     `content` (LM Studio đã tách sẵn `reasoning_content`) và lọc thêm thẻ <think>.
+#   - mỗi vòng mất khoảng 5-13 giây trên GTX 1650Ti, nên các lệnh phổ biến
+#     (mở app, phát nhạc, xem giờ, media key) được xử lý thẳng bằng jarvis/intents.py
+#     mà không gọi LLM.
 # --------------------------------------------------------------------------------------
 llm:
   api_host: localhost:1234
-  model: qwen2.5-3b-instruct
+  model: nvidia/nemotron-3-nano-4b
   temperature: 0.4
-  max_tokens: 512
-  context_length: 4096
-  max_tool_rounds: 6
+  max_tokens: 1024
+  context_length: 8192
+  max_tool_rounds: 4
+  empty_reply_retries: 2   # nemotron thỉnh thoảng trả về rỗng; thử lại là xong
   request_timeout_s: 180
-  history_turns: 6
+  history_turns: 4
 
 # --------------------------------------------------------------------------------------
 # Wake word - openWakeWord
@@ -94,6 +106,10 @@ audio:
 # Tools mà LLM được phép gọi
 # --------------------------------------------------------------------------------------
 tools:
+  # ---- Ngày giờ: đọc thẳng đồng hồ máy trong Python, không gọi PowerShell ------------
+  clock:
+    enabled: true
+
   # ---- Lệnh hệ thống: CHỈ chạy được những lệnh liệt kê dưới đây ----------------------
   shell:
     enabled: true
@@ -162,12 +178,8 @@ tools:
              ForEach-Object { $_.InterfaceAlias + ': ' + $_.IPAddress }"
         timeout_s: 30
 
-      - name: current_datetime
-        description: "Xem ngày giờ hiện tại của máy."
-        executable: powershell.exe
-        use_powershell: true
-        args: ["Get-Date -Format 'dddd, dd/MM/yyyy HH:mm'"]
-        timeout_s: 15
+      # Ngày giờ KHÔNG còn ở đây: đã có tool `get_current_datetime` (tools.clock),
+      # nhanh hơn vì không spawn PowerShell và không phụ thuộc locale của Windows.
 
       - name: running_apps
         description: "Liệt kê các ứng dụng đang chạy chiếm nhiều RAM nhất."
@@ -258,11 +270,24 @@ tools:
         kind: uri
         target: "microsoft-edge:"
         description: "Microsoft Edge"
+      trinh_duyet:
+        kind: uri
+        target: "microsoft-edge:"
+        description: "Mở trình duyệt mặc định (không có trang cụ thể)"
 
   # ---- Media keys / âm lượng (PyAutoGUI) --------------------------------------------
   media:
     enabled: true
     volume_step: 4
+
+  # ---- Phát một bài hát theo tên ------------------------------------------------------
+  # provider: youtube        = tìm video rồi mở đúng bài (tự phát)
+  #           youtube_search = chỉ mở trang kết quả tìm kiếm
+  #           spotify        = mở tìm kiếm trong app Spotify
+  # Chỉ những host trong allowed_hosts mới được mở từ kết quả tìm kiếm.
+  music:
+    enabled: true
+    provider: youtube
 
   # ---- Web search -------------------------------------------------------------------
   web_search:

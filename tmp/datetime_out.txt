@@ -1,0 +1,2 @@
+﻿prompt='máº¥y giá» rá»“i' tools_used=[] answer='ÄĂ¢y lĂ  thá»i gian hiá»‡n táº¡i: ÄĂªm hĂ´m nay, ngĂ y 01/01/2023, vĂ o lĂºc 22:45.'
+prompt='bĂ¢y giá» lĂ  ngĂ y máº¥y' tools_used=[] answer='BĂ¢y giá» lĂ  ngĂ y 01 trong thĂ¡ng 01 nÄƒm 2023.'

@@ -7,16 +7,29 @@ Jarvis là trợ lý giọng nói local-first cho Windows: wake word `Hey Jarvis
 - **STT offline:** [`hynt/Zipformer-30M-RNNT-6000h`](https://huggingface.co/hynt/Zipformer-30M-RNNT-6000h) qua `sherpa-onnx`.
 - **TTS offline:** VITS/Piper `vi_VN-vais1000-medium` qua `sherpa-onnx`.
 - **Wake word:** cụm STT cục bộ `Xin chào` (hoặc model openWakeWord `hey_jarvis` khi cấu hình `stt_phrase: null`).
-- **LLM local:** LM Studio + `qwen2.5-3b-instruct` Q4 (đã phù hợp máy có 4 GB VRAM).
+- **LLM local:** LM Studio + `nvidia/nemotron-3-nano-4b` Q4_K_M (~2,8 GB, vừa 4 GB VRAM). Jarvis gọi LM Studio qua REST OpenAI-compatible nên **không cần SDK riêng của nhà cung cấp**, và đổi sang server tương thích khác chỉ là đổi `llm.api_host`.
+- **Intent router:** `jarvis/intents.py` xử lý thẳng các lệnh phổ biến (xem ngày giờ, mở app, phát bài hát, phím media) mà không gọi LLM.
 - **Giao diện:** system tray có trạng thái idle / listening / thinking / speaking.
-- **Tools:** lệnh Windows whitelist, mở ứng dụng qua alias, media keys, DuckDuckGo/SearxNG và browser-use tùy chọn.
+- **Tools:** ngày giờ, mở ứng dụng qua alias, phát bài hát theo tên, DuckDuckGo/SearxNG, media keys, lệnh Windows whitelist, và browser-use tùy chọn.
+
+### Vì sao có intent router
+
+`nemotron-3-nano-4b` là model *reasoning*: nó luôn sinh một khối `<think>` trước khi trả lời. Đo trên GTX 1650 4 GB:
+
+| Đường đi | Ví dụ | Thời gian |
+| --- | --- | --- |
+| Intent router | `mở youtube`, `mấy giờ rồi`, `phát bài ...` | < 0,2 giây (`play_song` ~1,3 giây vì phải tìm video) |
+| LLM + tool | `tìm thông tin về LM Studio` | ~35-40 giây |
+| LLM thuần | `xin chào, bạn là ai` | ~15-30 giây |
+
+Router cũng sửa một lỗi nội dung, không chỉ tốc độ: model suy luận bằng tiếng Anh nên cắt sai cụm từ tiếng Việt. Đo thực tế, `phát bài Em của ngày hôm qua` bị model gọi thành `play_song(song_name="Em")` vì nó hiểu "của ngày hôm qua" là "of yesterday". Router giữ nguyên văn tên bài.
 
 ## Yêu cầu
 
 - Windows 10/11, Python **3.11** (dự án chỉ hỗ trợ `>=3.11,<3.12`).
 - Microphone và loa hoạt động.
 - [LM Studio](https://lmstudio.ai/) đã cài.
-- Khuyến nghị 16 GB RAM. GPU 4 GB VRAM có thể dùng Qwen2.5 3B Q4; CUDA Toolkit 12.3 không tự động làm `sherpa-onnx` chạy CUDA.
+- Khuyến nghị 16 GB RAM. GPU 4 GB VRAM chạy được Nemotron 3 Nano 4B Q4_K_M; CUDA Toolkit 12.3 không tự động làm `sherpa-onnx` chạy CUDA.
 
 ## Cài đặt từ đầu
 
@@ -41,15 +54,20 @@ Lệnh trên tải Zipformer vào `models\stt\zipformer-30m-rnnt-6000h`, giọng
 
 ## LM Studio
 
-Tải Qwen2.5 3B Instruct quantized trong LM Studio hoặc bằng CLI:
+Tải Nemotron 3 Nano 4B quantized trong LM Studio hoặc bằng CLI:
 
 ```powershell
-& "$env:USERPROFILE\.lmstudio\bin\lms.exe" get "https://huggingface.co/lmstudio-community/Qwen2.5-3B-Instruct-GGUF" -y
+& "$env:USERPROFILE\.lmstudio\bin\lms.exe" get "https://huggingface.co/lmstudio-community/NVIDIA-Nemotron-3-Nano-4B-GGUF" -y
 & "$env:USERPROFILE\.lmstudio\bin\lms.exe" server start --port 1234 --bind 127.0.0.1
-& "$env:USERPROFILE\.lmstudio\bin\lms.exe" load qwen2.5-3b-instruct --gpu max --context-length 4096 --yes
+& "$env:USERPROFILE\.lmstudio\bin\lms.exe" load nvidia/nemotron-3-nano-4b --gpu max --context-length 8192 --yes
 ```
 
-Hoặc trong LM Studio, mở **Developer**, bấm **Start Server** và tải model. Mặc định `config.yaml` dùng `localhost:1234` và model key `qwen2.5-3b-instruct`. Kiểm tra key cài thực tế bằng `lms ls`; nếu khác, sửa `llm.model` trong `config.yaml`. Không bật CORS hoặc bind `0.0.0.0` trừ khi bạn chủ động cần truy cập từ mạng khác.
+Hoặc trong LM Studio, mở **Developer**, bấm **Start Server** và tải model. Mặc định `config.yaml` dùng `localhost:1234` và model key `nvidia/nemotron-3-nano-4b`. Kiểm tra key cài thực tế bằng `lms ls`; nếu khác, sửa `llm.model` trong `config.yaml`. Không bật CORS hoặc bind `0.0.0.0` trừ khi bạn chủ động cần truy cập từ mạng khác.
+
+Hai lưu ý riêng cho model reasoning này:
+
+- Giữ `llm.max_tokens` ở mức rộng (mặc định 1024). Phần `<think>` cũng tiêu tokens, nên budget 512 có thể bị suy luận ăn hết và trả về câu rỗng.
+- Phần suy luận **không bao giờ** được đọc ra loa. LM Studio trả nó ở field `reasoning_content` riêng, và `jarvis/llm.py` còn lọc thêm thẻ `<think>` để phòng trường hợp server cấu hình khác.
 
 ## Khởi chạy
 
@@ -74,16 +92,18 @@ Khi wake word được kích hoạt, Jarvis ghi âm đến khi phát hiện kho�
 ```powershell
 python -m jarvis --print-config
 python -m jarvis chat "Xin chào" --no-tools
+python -m jarvis chat "bây giờ mấy giờ rồi"        # intent router, không gọi LLM
+python -m jarvis chat "phát bài Em của ngày hôm qua"
 python -m jarvis speak "Xin chào, tôi là Jarvis" --out hello.wav
 python -m jarvis transcribe hello.wav
-python -m jarvis shell current_datetime
+python -m jarvis shell battery_status
 python -m jarvis open notepad
 python -m jarvis media volume_up
 python -m jarvis search "thời tiết Hà Nội hôm nay"
 python -m pytest -q
 ```
 
-`chat` có tools bật mặc định. Nếu model nhỏ gọi tool chưa ổn định, thử yêu cầu ngắn, rõ ý định; các tool vẫn bị giới hạn bởi cấu hình và không được tự sinh lệnh shell.
+`chat` đi qua đúng đường mà một lượt nói đi qua: intent router trước, LLM sau. Dùng `--no-tools` để bỏ cả hai và nói trực tiếp với model. Nếu model gọi tool chưa ổn định, hãy nói ngắn và rõ ý định; các tool vẫn bị giới hạn bởi cấu hình và không bao giờ được tự sinh lệnh shell.
 
 ## Cấu hình
 
@@ -96,7 +116,7 @@ audio:
 wake_word:
   threshold: 0.65
 llm:
-  model: qwen2.5-3b-instruct
+  model: nvidia/nemotron-3-nano-4b
 ```
 
 Các đường dẫn tương đối được tính từ thư mục chứa file config. Xem toàn bộ cấu hình đã parse bằng `python -m jarvis --print-config`.
@@ -142,6 +162,9 @@ Chỉ giao tác vụ trên website/tài khoản mà bạn tin cậy. Khi bật b
 | Triệu chứng | Cách xử lý |
 | --- | --- |
 | `LM Studio: LỖI` trong `doctor` | Bật Local Server tại `localhost:1234`, tải model và kiểm tra `lms ls`. |
+| Jarvis im lặng hoặc trả lời rỗng | Model reasoning đôi khi sinh `<think></think>` rồi dừng. `llm.empty_reply_retries` (mặc định 2) tự thử lại; tăng `llm.max_tokens` nếu vẫn gặp. |
+| Trả lời chậm 30 giây trở lên | Bình thường cho model reasoning trên GPU 4 GB. Các lệnh phổ biến đã được intent router xử lý dưới 1 giây; nạp model bằng `--gpu max` để đảm bảo không offload sang CPU. |
+| Jarvis đọc cả đoạn suy luận tiếng Anh | Không nên xảy ra. Kiểm tra `llm.api_host` đang trỏ đúng LM Studio; `jarvis/llm.py` lọc `<think>` và chỉ đọc `content`. |
 | Không tìm thấy model STT/TTS | Chạy lại `python scripts\download_models.py`, rồi `python -m jarvis doctor`. |
 | Không có hoặc sai microphone | Chạy `python -m jarvis devices`; cập nhật `audio.input_device` trong `config.local.yaml`. |
 | Wake word kích hoạt nhầm | Tăng `wake_word.threshold`; kiểm tra đúng microphone và môi trường ồn. |

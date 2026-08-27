@@ -1,0 +1,2 @@
+raw='Đang phát Em của ngày hôm qua trên YouTube.'
+opened=['https://www.youtube.com/watch?v=Vt4kAu-ziRY']

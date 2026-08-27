@@ -1,5 +1,10 @@
 # insight.md
 
+> **Ghi chép research ban đầu.** Hai kết luận trong tài liệu này đã bị thực tế sửa lại:
+> model LLM là `nvidia/nemotron-3-nano-4b`, và Jarvis không dùng SDK `lmstudio-python`
+> mà gọi REST OpenAI-compatible để tách được phần suy luận của model reasoning.
+> Xem [`structure.md`](structure.md) để biết trạng thái hiện tại.
+
 ## Problem Statement
 Xây dựng một trợ lý giọng nói cá nhân kiểu "Jarvis" chạy local-first trên Windows,
 dùng cho công việc cá nhân và làm project showcase GitHub. Agent nghe lệnh tiếng Việt

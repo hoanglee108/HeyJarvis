@@ -200,16 +200,29 @@ def cmd_doctor(config: JarvisConfig) -> int:
 
 
 def cmd_chat(config: JarvisConfig, args: argparse.Namespace) -> int:
+    """Text-mode equivalent of one voice turn.
+
+    It goes through the same intent router as the voice loop, so a command answered
+    deterministically there behaves identically here.
+    """
+    from .intents import IntentRouter
     from .llm import LLMClient, LlmError
     from .tools import ToolBox
 
     prompt = " ".join(args.text)
+    toolbox = ToolBox(config)
+
+    if not args.no_tools:
+        direct = IntentRouter(toolbox).route(prompt)
+        if direct is not None:
+            print(direct.reply)
+            return _speak_if_requested(config, args, direct.reply)
+
     client = LLMClient(config.llm)
     try:
-        if args.no_tools:
-            answer = client.chat(prompt)
-        else:
-            answer = client.act(prompt, ToolBox(config).build_tool_defs())
+        answer = (
+            client.chat(prompt) if args.no_tools else client.act(prompt, toolbox.build_tool_defs())
+        )
     except LlmError as exc:
         print(f"Lỗi: {exc}", file=sys.stderr)
         return 1
@@ -217,16 +230,21 @@ def cmd_chat(config: JarvisConfig, args: argparse.Namespace) -> int:
         client.close()
 
     print(answer or "(LLM không trả về nội dung)")
+    return _speak_if_requested(config, args, answer)
 
-    if args.speak and answer:
-        from .audio import Speaker
-        from .tts import TextToSpeech, TtsError
 
-        try:
-            TextToSpeech(config.tts, Speaker(config.audio)).speak(answer)
-        except TtsError as exc:
-            print(f"Không đọc được: {exc}", file=sys.stderr)
-            return 1
+def _speak_if_requested(config: JarvisConfig, args: argparse.Namespace, answer: str) -> int:
+    if not (args.speak and answer):
+        return 0
+
+    from .audio import Speaker
+    from .tts import TextToSpeech, TtsError
+
+    try:
+        TextToSpeech(config.tts, Speaker(config.audio)).speak(answer)
+    except TtsError as exc:
+        print(f"Không đọc được: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

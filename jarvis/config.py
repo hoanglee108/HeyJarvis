@@ -134,19 +134,42 @@ DEFAULT_SYSTEM_PROMPT = """\
 Bạn là Jarvis, trợ lý giọng nói cá nhân chạy hoàn toàn trên máy tính Windows của người dùng.
 
 Nguyên tắc trả lời:
-- Luôn trả lời bằng tiếng Việt, giọng văn tự nhiên, thân thiện, ngắn gọn.
+- CÂU TRẢ LỜI CUỐI CÙNG BẮT BUỘC VIẾT BẰNG TIẾNG VIỆT, kể cả khi bạn suy luận
+  bằng tiếng Anh ở bước trung gian. Không trả lời bằng tiếng Anh.
+- Giọng văn tự nhiên, thân thiện, ngắn gọn, tối đa 2 câu, trừ khi người dùng
+  yêu cầu chi tiết.
 - Câu trả lời sẽ được đọc thành tiếng, nên KHÔNG dùng markdown, bullet, emoji,
   bảng, code block hay ký tự đặc biệt. Chỉ viết văn xuôi thuần.
-- Trả lời tối đa 2-3 câu, trừ khi người dùng yêu cầu chi tiết.
+- TUYỆT ĐỐI KHÔNG đọc hay viết ra đường link, địa chỉ web, tên miền. Người dùng
+  đang nghe bằng tai nên link là vô nghĩa. Hãy nói nội dung, không nói nguồn.
 - Văn bản người dùng đến từ nhận dạng giọng nói nên có thể sai chính tả;
   hãy suy luận ý định hợp lý nhất thay vì hỏi lại nhiều lần.
 
+Trung thực:
+- Bạn tên là Jarvis. Không được tự nhận mình là mô hình nào khác.
+- KHÔNG được bịa. Không tự sửa hay tự nghĩ ra tên bài hát, tên người, tiêu đề,
+  con số hay sự kiện. Tên riêng tiếng Việt phải giữ NGUYÊN VĂN và ĐẦY ĐỦ như
+  người dùng đã nói, không dịch, không cắt ngắn.
+- Nếu không biết hoặc không chắc, hãy nói thẳng là không chắc.
+- Không nói rằng đã làm một việc nếu công cụ chưa thực sự trả về kết quả thành công.
+- Khi công cụ đã trả về dữ liệu (ngày giờ, pin, kết quả tìm kiếm), hãy lặp lại
+  ĐÚNG con số và tên trong kết quả đó, không được đổi sang giá trị khác.
+
 Cách dùng công cụ:
-- Khi cần thao tác máy, mở ứng dụng, điều khiển nhạc hay tra cứu thông tin mới,
-  hãy gọi công cụ tương ứng thay vì phỏng đoán.
-- Chỉ gọi công cụ khi thật sự cần. Sau khi công cụ trả kết quả, hãy tóm tắt lại
-  bằng một câu nói tự nhiên cho người dùng nghe.
+- Khi cần thao tác máy, mở ứng dụng, phát nhạc hay tra cứu thông tin mới,
+  hãy GỌI CÔNG CỤ NGAY. Không xin phép, không hỏi lại người dùng có muốn hay không.
+- Mỗi lượt chỉ gọi một công cụ. Sau khi có kết quả, hãy tóm tắt lại bằng một câu
+  tiếng Việt tự nhiên cho người dùng nghe, rồi dừng.
 - Nếu công cụ báo lỗi, hãy nói rõ ngắn gọn là không thực hiện được và vì sao.
+- Nếu không có công cụ nào làm được việc người dùng yêu cầu, hãy nói thẳng rằng
+  bạn chưa làm được việc đó, thay vì mô tả một hành động không xảy ra.
+- BẠN KHÔNG BIẾT ngày giờ hiện tại, pin, RAM, IP hay ứng dụng nào đang chạy.
+  Kiến thức bạn được huấn luyện đã cũ và không cập nhật theo máy người dùng.
+  Hỏi về ngày giờ thì BẮT BUỘC gọi get_current_datetime; hỏi về pin, ổ đĩa, mạng
+  thì gọi run_system_command. TUYỆT ĐỐI không tự đoán từ trí nhớ của bạn.
+- Khi người dùng muốn mở trình duyệt, mở trang web, mở ứng dụng, hoặc phát nhạc,
+  hãy dùng open_application/play_song/search_web ngay, đây là các hành động thật
+  trên máy người dùng, không phải mô phỏng.
 """
 
 
@@ -154,16 +177,21 @@ class LlmConfig(_Base):
     #: LM Studio server address, e.g. ``localhost:1234`` (no scheme).
     api_host: str = "localhost:1234"
     #: Model key as shown by ``lms ls`` / LM Studio UI.
-    model: str = "qwen2.5-3b-instruct"
+    model: str = "nvidia/nemotron-3-nano-4b"
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     temperature: Annotated[float, Field(ge=0.0, le=2.0)] = 0.4
-    max_tokens: Annotated[int, Field(ge=16, le=8192)] = 512
-    context_length: Annotated[int, Field(ge=512)] = 4096
+    #: Nemotron spends tokens on an internal ``<think>`` block before answering, so a
+    #: 512-token budget can be consumed entirely by reasoning and return empty text.
+    max_tokens: Annotated[int, Field(ge=16, le=8192)] = 1024
+    context_length: Annotated[int, Field(ge=512)] = 8192
     #: Safety valve for the tool-calling loop.
-    max_tool_rounds: Annotated[int, Field(ge=1, le=20)] = 6
+    max_tool_rounds: Annotated[int, Field(ge=1, le=20)] = 4
+    #: Nemotron sometimes emits an empty ``<think></think>`` and stops without
+    #: answering. Retrying the identical request normally fixes it.
+    empty_reply_retries: Annotated[int, Field(ge=0, le=5)] = 2
     request_timeout_s: Annotated[float, Field(gt=1)] = 180.0
     #: Keep the last N turns of conversation in memory (user+assistant pairs).
-    history_turns: Annotated[int, Field(ge=0, le=50)] = 6
+    history_turns: Annotated[int, Field(ge=0, le=50)] = 4
 
     @field_validator("api_host")
     @classmethod
@@ -268,6 +296,26 @@ class MediaToolConfig(_Base):
     volume_step: Annotated[int, Field(ge=1, le=20)] = 4
 
 
+class ClockToolConfig(_Base):
+    """Reads the machine clock in-process (no PowerShell, no network)."""
+
+    enabled: bool = True
+
+
+class MusicToolConfig(_Base):
+    """Play a named song (``mở bài hát …``) instead of only pressing media keys."""
+
+    enabled: bool = True
+    #: ``youtube`` opens the matching video (autoplays); ``spotify`` opens a search
+    #: in the desktop app; ``youtube_search`` never auto-opens a result page.
+    provider: Literal["youtube", "youtube_search", "spotify"] = "youtube"
+    #: Resolve the video through web search so playback starts on the right song.
+    #: Only URLs on ``allowed_hosts`` are ever opened.
+    allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"]
+    )
+
+
 class WebSearchToolConfig(_Base):
     enabled: bool = True
     backend: Literal["duckduckgo", "searxng"] = "duckduckgo"
@@ -293,9 +341,11 @@ class BrowserUseToolConfig(_Base):
 
 
 class ToolsConfig(_Base):
+    clock: ClockToolConfig = Field(default_factory=ClockToolConfig)
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     apps: AppsToolConfig = Field(default_factory=AppsToolConfig)
     media: MediaToolConfig = Field(default_factory=MediaToolConfig)
+    music: MusicToolConfig = Field(default_factory=MusicToolConfig)
     web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)
     browser_use: BrowserUseToolConfig = Field(default_factory=BrowserUseToolConfig)
 

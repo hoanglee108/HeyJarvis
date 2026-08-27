@@ -57,15 +57,16 @@ def pipeline(real_config: JarvisConfig, monkeypatch: pytest.MonkeyPatch) -> Pipe
 def test_full_turn_transcribes_then_speaks_the_reply(
     pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(pipeline.stt, "transcribe", lambda *a, **k: "mấy giờ rồi")
-    monkeypatch.setattr(pipeline.llm, "act", lambda *a, **k: "Bây giờ là 3 giờ chiều.")
+    # An open-ended request, so this exercises the LLM path rather than the router.
+    monkeypatch.setattr(pipeline.stt, "transcribe", lambda *a, **k: "kể tôi nghe một câu chuyện")
+    monkeypatch.setattr(pipeline.llm, "act", lambda *a, **k: "Ngày xưa có một chú mèo.")
 
     result = pipeline.process_audio(np.zeros(16000, dtype=np.float32), 16000)
 
     assert result.ok
-    assert result.transcript == "mấy giờ rồi"
-    assert result.reply == "Bây giờ là 3 giờ chiều."
-    assert pipeline.tts.said == ["Bây giờ là 3 giờ chiều."]  # type: ignore[attr-defined]
+    assert result.transcript == "kể tôi nghe một câu chuyện"
+    assert result.reply == "Ngày xưa có một chú mèo."
+    assert pipeline.tts.said == ["Ngày xưa có một chú mèo."]  # type: ignore[attr-defined]
 
 
 def test_state_cycle_of_one_turn(pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,6 +79,67 @@ def test_state_cycle_of_one_turn(pipeline: Pipeline, monkeypatch: pytest.MonkeyP
     assert State.THINKING in seen
     assert State.SPEAKING in seen
     assert seen[-1] is State.IDLE
+
+
+def _forbid_llm(pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_args, **_kwargs):
+        raise AssertionError("the intent router should have handled this without the LLM")
+
+    monkeypatch.setattr(pipeline.llm, "act", boom)
+    monkeypatch.setattr(pipeline.llm, "chat", boom)
+
+
+def test_datetime_question_bypasses_llm_to_avoid_hallucination(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A small local LLM has no notion of "now" and will confidently invent a date."""
+    monkeypatch.setattr(pipeline.stt, "transcribe", lambda *a, **k: "mấy giờ rồi")
+    monkeypatch.setattr(pipeline.tools.clock, "describe", lambda: "Bây giờ là 21 giờ 20 phút.")
+    _forbid_llm(pipeline, monkeypatch)
+
+    result = pipeline.process_audio(np.zeros(16000, dtype=np.float32), 16000)
+
+    assert result.ok
+    assert result.reply == "Bây giờ là 21 giờ 20 phút."
+    assert result.tools_used == ["get_current_datetime"]
+    assert pipeline.tts.said == ["Bây giờ là 21 giờ 20 phút."]  # type: ignore[attr-defined]
+
+
+def test_open_app_command_bypasses_the_llm(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline.tools.apps, "open", lambda alias: "Đã mở YouTube.")
+    _forbid_llm(pipeline, monkeypatch)
+
+    result = pipeline.respond_to_text("mở youtube giúp tôi")
+
+    assert result.reply == "Đã mở YouTube."
+    assert result.tools_used == ["open_application"]
+
+
+def test_play_song_command_bypasses_the_llm_and_keeps_the_full_title(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    played: list[str] = []
+    monkeypatch.setattr(
+        pipeline.tools.music,
+        "play",
+        lambda song: played.append(song) or f"Đang phát {song}.",
+    )
+    _forbid_llm(pipeline, monkeypatch)
+
+    result = pipeline.respond_to_text("phát bài Em của ngày hôm qua")
+
+    assert played == ["Em của ngày hôm qua"]
+    assert result.tools_used == ["play_song"]
+
+
+def test_open_ended_request_still_reaches_the_llm(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline.llm, "act", lambda *a, **k: "Tôi đã tìm được thông tin.")
+    result = pipeline.respond_to_text("tìm thông tin về LM Studio")
+    assert result.reply == "Tôi đã tìm được thông tin."
 
 
 def test_tools_used_are_reported(pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch) -> None:

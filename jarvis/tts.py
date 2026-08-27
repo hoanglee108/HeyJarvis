@@ -21,6 +21,10 @@ log = get_logger("jarvis.tts")
 
 #: Markdown / decorative characters that must never be read out loud.
 _STRIP_PATTERN = re.compile(r"[*_`#>|~\[\]{}<>]+")
+#: ``[label](https://…)`` -> ``label``; the target must never be read out loud.
+_MD_LINK_PATTERN = re.compile(r"\[([^\]]*)\]\(\s*[^)\s]+\s*\)")
+#: Bare links, including bracketed leftovers and ``www.`` hosts without a scheme.
+_URL_PATTERN = re.compile(r"(?:https?://|ftp://|www\.)[^\s<>\]\)]+", flags=re.IGNORECASE)
 _EMOJI_PATTERN = re.compile(
     "[" "\U0001f300-\U0001faff" "\U00002600-\U000027bf" "\U0001f1e6-\U0001f1ff" "\u2190-\u21ff" "]+",
     flags=re.UNICODE,
@@ -44,12 +48,22 @@ class SynthesisResult:
 
 
 def clean_for_speech(text: str) -> str:
-    """Strip markdown, emoji and bullet artefacts so the voice sounds natural."""
+    """Strip markdown, links, emoji and bullet artefacts for natural speech.
+
+    Reading a URL aloud produces long stretches of meaningless syllables that bury
+    the actual answer, so link targets are dropped and only the label is kept.
+    """
     cleaned = _EMOJI_PATTERN.sub(" ", text or "")
+    cleaned = _MD_LINK_PATTERN.sub(r"\1", cleaned)
+    cleaned = _URL_PATTERN.sub(" ", cleaned)
     cleaned = _STRIP_PATTERN.sub(" ", cleaned)
     cleaned = re.sub(r"^\s*[-•‣▪]\s*", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"\s*\n\s*", ". ", cleaned)
+    # Empty brackets/parens are what a removed link leaves behind.
+    cleaned = re.sub(r"\(\s*\)", " ", cleaned)
+    cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned)
     cleaned = re.sub(r"\.{2,}", ".", cleaned)
+    cleaned = re.sub(r"(?:\.\s*){2,}", ". ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return cleaned.strip(" .;:,-").strip()
 
