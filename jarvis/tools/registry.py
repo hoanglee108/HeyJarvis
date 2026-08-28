@@ -152,11 +152,11 @@ class ToolBox:
             return f"Lỗi không mong đợi khi phát nhạc: {exc}"
 
     def search_web(self, query: str = "", **extra: Any) -> str:
-        """Search the web and return snippets for the model to summarise."""
+        """Search the web and return one block of URL-free material to synthesise."""
         self._record("search_web")
         requested = _first_value(query, extra.get("q"), extra.get("search_query"))
         try:
-            return self.web.search_as_text(requested)
+            return self.web.answer_context(requested)
         except WebSearchError as exc:
             log.warning("search_web thất bại: %s", exc)
             return f"Lỗi: {exc}"
@@ -227,7 +227,11 @@ class ToolBox:
         return (
             "Tìm kiếm thông tin mới trên Internet (tin tức, thời tiết, giá cả, sự kiện). "
             "Truyền query là câu truy vấn tiếng Việt ngắn gọn. "
-            "Trả về danh sách tiêu đề và đoạn trích để bạn tóm tắt lại cho người dùng."
+            "Công cụ trả về một khối tư liệu đã gộp sẵn từ nhiều nguồn và đã bỏ hết "
+            "đường dẫn. Việc của bạn là TỔNG HỢP khối tư liệu đó thành MỘT câu trả lời "
+            "tiếng Việt duy nhất, dài 1 đến 2 câu, có con số và mốc thời gian nếu tư "
+            "liệu nêu. TUYỆT ĐỐI không liệt kê nhiều kết quả, không đánh số, không đọc "
+            "tên trang web hay địa chỉ web, vì người dùng đang nghe bằng tai."
         )
 
     @staticmethod
@@ -368,6 +372,36 @@ class ToolBox:
         )
         return definitions
 
+    def _search_backend_detail(self) -> str:
+        """Extra detail for the ``web_search`` doctor line.
+
+        Each backend has one prerequisite that is invisible until a search runs: an
+        optional package for ``ddgs``, a URL for ``searxng``, an API key for ``brave``.
+        Reporting it here beats letting the first spoken question be what finds out.
+        """
+        config = self.config.tools.web_search
+        if config.backend == "brave":
+            # Never the key itself: this line is printed to the console and pasted into
+            # bug reports. And only whether a key was *found*, not that it works - an
+            # invalid token is only discovered when a search runs, where Brave answers
+            # HTTP 422 for it.
+            state = "đã có key" if config.resolved_brave_api_key() else "CHƯA có key"
+            return (
+                f", {state}, lang={config.brave_search_lang}, country={config.brave_country}"
+                f", extra_snippets={'on' if config.brave_extra_snippets else 'off'}"
+            )
+        if config.backend == "ddgs":
+            try:
+                import ddgs  # noqa: F401
+
+                installed = "đã cài"
+            except Exception:  # noqa: BLE001
+                installed = "CHƯA cài"
+            return f", engines={config.ddgs_engines}, package {installed}"
+        if config.backend == "searxng":
+            return f", url={config.searxng_url or 'CHƯA đặt'}"
+        return ""
+
     def summary(self) -> list[str]:
         """Short status lines for ``jarvis doctor``."""
         rows = [
@@ -377,7 +411,7 @@ class ToolBox:
             f"music          : {'on' if self.music.enabled else 'off'} "
             f"(provider={self.config.tools.music.provider})",
             f"web_search     : {'on' if self.web.enabled else 'off'} "
-            f"(backend={self.config.tools.web_search.backend})",
+            f"(backend={self.config.tools.web_search.backend}{self._search_backend_detail()})",
             f"media          : {'on' if self.media.enabled else 'off'}",
             f"shell          : {'on' if self.shell.enabled else 'off'} "
             f"({len(self.shell.names)} lệnh whitelist)",

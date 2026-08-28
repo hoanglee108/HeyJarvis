@@ -1,2 +1,0 @@
-prompt='mấy giờ rồi' tools_used=[] answer='Để biết chính xác thời gian hiện tại, tôi sẽ gọi công cụ.'
-prompt='bây giờ là ngày mấy' tools_used=[] answer='Tôi sẽ gọi công cụ để lấy thông tin về ngày hiện tại.'

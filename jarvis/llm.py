@@ -33,8 +33,11 @@ from .logging_setup import get_logger
 
 log = get_logger("jarvis.llm")
 
-#: Cap on how much of a tool result is fed back into the context.
-MAX_TOOL_RESULT_CHARS = 1500
+#: Cap on how much of a tool result is fed back into the context. Sized to hold a full
+#: ``web_search`` block (``tools.web_search.context_chars``, 2600 by default, plus its
+#: fence and instruction line) while leaving room for the system prompt, the inlined
+#: tool catalogues and ``max_tokens`` of output inside an 8192-token context.
+MAX_TOOL_RESULT_CHARS = 3200
 #: Cap on a raw tool result used as a last-resort spoken answer.
 MAX_SPOKEN_FALLBACK_CHARS = 400
 
@@ -107,6 +110,25 @@ _TOOL_MARKUP = re.compile(
 
 #: A voice assistant must never read a URL out loud.
 _URL = re.compile(r"\(?\b(?:https?://|www\.)\S+\)?", re.IGNORECASE)
+
+
+def clamp_tool_result(text: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
+    """Shorten an oversized tool result from the *middle*, keeping both ends.
+
+    Plain ``text[:limit]`` drops the tail, and for ``search_web`` the tail is where the
+    "synthesise this into one sentence" instruction lives - exactly the part that must
+    survive. Keeping head and tail also means a raised ``context_chars`` degrades into
+    less material rather than a silently missing instruction.
+    """
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    marker = "\n…(đã cắt bớt phần giữa)…\n"
+    keep = limit - len(marker)
+    if keep <= 0:
+        return text[:limit]
+    head = keep * 2 // 3
+    return text[:head] + marker + text[len(text) - (keep - head) :]
 
 
 def speakable(text: str, limit: int = MAX_SPOKEN_FALLBACK_CHARS) -> str:
@@ -415,7 +437,7 @@ class LLMClient:
                     {
                         "role": "tool",
                         "tool_call_id": call.get("id") or name,
-                        "content": result[:MAX_TOOL_RESULT_CHARS],
+                        "content": clamp_tool_result(result),
                     }
                 )
 

@@ -1,4 +1,0 @@
-answer='Tôi không tìm thấy bài hát "em của ngày hôm qua". Bạn có thể cung cấp thêm thông tin không?'
-rounds=[0, 1]
-calls=[((), {}, 'Lỗi: thiếu tên bài hát. Hãy gọi lại play_song với song_name là tên bài hát, ví dụ song_name="Em của ngày hôm qua".')]
-opened=[]

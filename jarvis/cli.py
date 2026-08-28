@@ -92,8 +92,13 @@ def build_parser() -> argparse.ArgumentParser:
     media_cmd = sub.add_parser("media", help="Điều khiển nhạc / âm lượng")
     media_cmd.add_argument("action", nargs="?", help="play_pause, next, volume_up…")
 
-    search_cmd = sub.add_parser("search", help="Tìm kiếm web (DuckDuckGo/SearxNG)")
+    search_cmd = sub.add_parser("search", help="Tìm kiếm web (Brave/DuckDuckGo/ddgs/SearxNG)")
     search_cmd.add_argument("query", nargs="+")
+    search_cmd.add_argument(
+        "--raw",
+        action="store_true",
+        help="Hiện danh sách kết quả kèm đường dẫn thay vì khối tư liệu gửi cho LLM",
+    )
 
     browse_cmd = sub.add_parser("browse", help="Giao tác vụ web cho browser-use")
     browse_cmd.add_argument("task", nargs="+")
@@ -348,8 +353,11 @@ def cmd_media(config: JarvisConfig, args: argparse.Namespace) -> int:
 def cmd_search(config: JarvisConfig, args: argparse.Namespace) -> int:
     from .tools import WebSearch, WebSearchError
 
+    search = WebSearch(config.tools.web_search)
+    query = " ".join(args.query)
     try:
-        print(WebSearch(config.tools.web_search).search_as_text(" ".join(args.query)))
+        # Default to exactly what the LLM receives, so what you debug is what runs.
+        print(search.search_as_text(query) if args.raw else search.answer_context(query))
     except WebSearchError as exc:
         print(f"Lỗi: {exc}", file=sys.stderr)
         return 1

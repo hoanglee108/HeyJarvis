@@ -82,10 +82,12 @@ class ShellRunner:
             if any(char in argument for char in ('"', "'", "`", "\0")):
                 raise ShellToolError("Tham số chứa ký tự không được phép.")
 
-        expanded_args = [os.path.expandvars(arg) for arg in spec.args]
-
         if spec.use_powershell:
-            script = " ".join(expanded_args)
+            # Do NOT expandvars here: PowerShell's own `$var` syntax collides with the
+            # POSIX form expandvars understands, so `$os` would be rewritten to the
+            # value of the OS environment variable ("Windows_NT") and break the script.
+            # PowerShell expands `$env:NAME` itself, which is what the whitelist uses.
+            script = " ".join(spec.args)
             return [
                 spec.executable or "powershell.exe",
                 "-NoProfile",
@@ -94,7 +96,8 @@ class ShellRunner:
                 script,
             ]
 
-        argv = [spec.executable, *expanded_args]
+        # Non-PowerShell commands use the Windows `%VAR%` form, which is safe to expand.
+        argv = [spec.executable, *(os.path.expandvars(arg) for arg in spec.args)]
         if argument:
             if spec.argument_args:
                 argv.extend(

@@ -13,10 +13,12 @@ import pytest
 from jarvis.config import LlmConfig
 from jarvis.llm import (
     ANSWER_NUDGE,
+    MAX_TOOL_RESULT_CHARS,
     LLMClient,
     LlmError,
     LlmUnavailableError,
     ToolSpec,
+    clamp_tool_result,
     speakable,
     strip_reasoning,
 )
@@ -146,6 +148,33 @@ def test_reasoning_content_field_never_reaches_the_answer(config: LlmConfig) -> 
 def test_speakable_strips_urls() -> None:
     raw = "1. LM Studio (https://lmstudio.ai/) chạy model cục bộ"
     assert speakable(raw) == "1. LM Studio chạy model cục bộ"
+
+
+# --------------------------------------------------------------------------------------
+# an oversized tool result must keep its tail: that is where search_web's
+# "synthesise this into one sentence" instruction lives
+# --------------------------------------------------------------------------------------
+def test_clamp_tool_result_leaves_short_results_untouched() -> None:
+    assert clamp_tool_result("kết quả ngắn") == "kết quả ngắn"
+
+
+def test_clamp_tool_result_keeps_both_ends() -> None:
+    text = "ĐẦU " + ("x" * 5000) + " CUỐI: hãy tổng hợp thành một câu."
+    clamped = clamp_tool_result(text, limit=500)
+    assert len(clamped) <= 500
+    assert clamped.startswith("ĐẦU ")
+    assert clamped.endswith("CUỐI: hãy tổng hợp thành một câu.")
+    assert "cắt bớt" in clamped
+
+
+def test_tool_result_budget_fits_a_full_web_search_block() -> None:
+    """Guards the coupling between MAX_TOOL_RESULT_CHARS and web_search.context_chars."""
+    from jarvis.config import WebSearchToolConfig
+
+    default_context = WebSearchToolConfig().context_chars
+    assert MAX_TOOL_RESULT_CHARS >= default_context + 400, (
+        "khối tư liệu cộng phần rào và dòng chỉ dẫn phải vừa trong ngân sách tool result"
+    )
 
 
 def test_speakable_strips_bare_www_links() -> None:

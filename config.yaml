@@ -290,13 +290,70 @@ tools:
     provider: youtube
 
   # ---- Web search -------------------------------------------------------------------
+  # Tool này KHÔNG trả về danh sách 5 link. Nó tìm kiếm, thu tư liệu, xoá sạch đường
+  # dẫn, rồi gộp thành MỘT khối để LLM tổng hợp thành 1-2 câu. Người dùng nghe bằng
+  # tai nên link là vô nghĩa.
+  #
+  # backend:
+  #   brave      = mặc định. Brave Search API chính thức. Là API thật nên không bị
+  #                chặn kiểu scraper, và trả kèm tới 5 đoạn trích (extra_snippets)
+  #                được chọn theo đúng truy vấn - đủ dùng mà không cần mở trang.
+  #                CẦN API KEY, xem mục brave_api_key bên dưới.
+  #   duckduckgo = không cần key, chỉ cần `requests`.
+  #                Nhược điểm: scrape một engine duy nhất nên bị rate-limit.
+  #                Khi bị chặn sẽ trả HTTP 202 kèm trang chống bot, có thể kéo dài
+  #                nhiều giờ. Jarvis báo đúng lý do chứ không nói "không tìm thấy".
+  #   ddgs       = gộp nhiều engine (Bing, Google, Brave, Yandex, DuckDuckGo...).
+  #                Một engine bị chặn thì tự chuyển sang engine khác.
+  #                Cần: pip install -r requirements-search.txt
+  #   searxng    = trỏ tới một instance SearxNG có bật `format: json`.
   web_search:
     enabled: true
-    backend: duckduckgo      # duckduckgo | searxng
+    backend: brave           # brave | duckduckgo | ddgs | searxng
+
+    # -- Brave Search API -------------------------------------------------------------
+    # KEY LÀ BÍ MẬT, KHÔNG ĐẶT VÀO FILE NÀY (file này được commit vào git).
+    # Đặt một trong hai chỗ sau, Jarvis ưu tiên biến môi trường:
+    #   1. biến môi trường BRAVE_API_KEY
+    #   2. config.local.yaml (đã git-ignore), dạng:
+    #        tools:
+    #          web_search:
+    #            brave_api_key: "BSA..."
+    # Lấy key: api-dashboard.search.brave.com - plan Search có 5 đô credit miễn phí
+    # mỗi tháng (~1.000 truy vấn), cần gắn thẻ để xác thực và cần ghi credit Brave
+    # Search API trong project.
+    brave_api_key: null
+    # Danh sách `country` của Brave là enum đóng và KHÔNG có Việt Nam (country=VN trả
+    # HTTP 422). `ALL` nghĩa là không giới hạn địa lý; chính brave_search_lang mới là
+    # thứ kéo nguồn tiếng Việt lên đầu.
+    brave_country: ALL
+    brave_search_lang: vi
+    # Xin thêm tối đa 5 đoạn trích mỗi kết quả. Đây là lý do read_pages có thể để 0.
+    brave_extra_snippets: true
+    # Lọc theo độ mới: pd (24h) | pw (7 ngày) | pm (31 ngày) | py (1 năm) | null.
+    # Để null cho câu hỏi thường; bật pd/pw nếu hay hỏi tin trong ngày.
+    brave_freshness: null
+
+    # -- Các backend khác -------------------------------------------------------------
     searxng_url: null        # ví dụ http://localhost:8080 nếu tự host SearxNG
-    max_results: 5
+    # Chỉ dùng khi backend là ddgs. `auto` để thư viện tự xoay vòng engine.
+    # Muốn pin cứng thì liệt kê, ví dụ "bing,brave,yandex". Đo trên truy vấn tiếng Việt,
+    # bing/brave/yandex ổn định nhất; mojeek/startpage/wikipedia thường trả rỗng, và
+    # google/duckduckgo lúc được lúc không - đó chính là lý do nên để `auto`.
+    ddgs_engines: auto
+
+    # -- Chung ------------------------------------------------------------------------
+    max_results: 5           # số ứng viên lấy từ engine (Brave tối đa 20)
     timeout_s: 15
-    region: vn-vi
+    region: vn-vi            # dùng cho duckduckgo/ddgs; Brave dùng 2 field riêng ở trên
+    # Với backend brave, extra_snippets đã thay được việc mở trang, nên để 0: mỗi câu
+    # hỏi chỉ còn MỘT request, nhanh hơn và không phải fetch URL do engine trả về.
+    # Với duckduckgo/ddgs/searxng thì nên đặt 1-2, vì snippet của chúng chỉ là mô tả
+    # trang và hiếm khi chứa con số người dùng hỏi.
+    read_pages: 0
+    page_chars: 1200         # số ký tự giữ lại mỗi trang
+    context_chars: 2600      # ngân sách cho toàn bộ khối tư liệu gửi cho LLM
+    page_timeout_s: 8        # ngắn hơn timeout_s để một trang chậm không treo lượt nói
 
   # ---- browser-use (tùy chọn, nặng) -------------------------------------------------
   # Bật sau khi đã: pip install -r requirements-browser.txt && playwright install chromium

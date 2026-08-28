@@ -11,5 +11,8 @@ logs/
 *.wav
 !tests/data/*.wav
 
+# Script dò/thử tạm thời khi debug
+tmp/
+
 # Local overrides
 config.local.yaml

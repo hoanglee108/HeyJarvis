@@ -316,10 +316,51 @@ class MusicToolConfig(_Base):
     )
 
 
+#: Environment variables consulted for the Brave subscription token, in order. The
+#: token is a secret, so the env var (or the git-ignored ``config.local.yaml``) is the
+#: intended home for it - never the committed ``config.yaml``.
+BRAVE_API_KEY_ENV_VARS = ("BRAVE_API_KEY", "JARVIS_BRAVE_API_KEY")
+
+
 class WebSearchToolConfig(_Base):
+    """Search the web, then hand the LLM one block of prose to synthesise from.
+
+    A voice assistant cannot read a list of five links out loud, and a single search
+    snippet is a page *description* that rarely contains the figure the user asked for.
+    Two ways to get past that: ``read_pages`` opens the top results and extracts their
+    body text, and the Brave backend asks the API for several query-relevant excerpts
+    per result. Either way the combined material is what the model condenses into one
+    or two spoken sentences.
+    """
+
     enabled: bool = True
-    backend: Literal["duckduckgo", "searxng"] = "duckduckgo"
+    #: ``brave`` calls the official Brave Search API. Needs a key, but it is a real
+    #: API rather than a scrape, so it does not get throttled into an anti-bot page.
+    #: ``duckduckgo`` scrapes one engine with ``requests`` and needs no extra package.
+    #: ``ddgs`` aggregates several engines and survives one of them rate-limiting us,
+    #: at the cost of an optional dependency (see requirements-search.txt).
+    #: ``searxng`` queries an instance you point ``searxng_url`` at.
+    backend: Literal["brave", "duckduckgo", "searxng", "ddgs"] = "brave"
     searxng_url: str | None = None
+    #: Brave subscription token. Leave ``None`` here and supply it through
+    #: ``BRAVE_API_KEY`` or ``config.local.yaml``; see :meth:`resolved_brave_api_key`.
+    brave_api_key: str | None = None
+    #: Brave's ``country`` is a closed enum that does **not** include Vietnam - the
+    #: live API answers HTTP 422 for ``country=VN``. ``ALL`` means "no geographic
+    #: restriction"; ``search_lang`` is what actually pulls Vietnamese sources up.
+    brave_country: str = "ALL"
+    brave_search_lang: str = "vi"
+    #: Ask for up to 5 extra query-relevant excerpts per result. This is why the Brave
+    #: backend can answer well with ``read_pages: 0``.
+    brave_extra_snippets: bool = True
+    #: Optional recency filter: ``pd`` (24h), ``pw`` (7d), ``pm`` (31d), ``py`` (1y),
+    #: or a ``YYYY-MM-DDtoYYYY-MM-DD`` range. ``None`` = no filter.
+    brave_freshness: str | None = None
+    #: Engines used when ``backend: ddgs``. ``auto`` lets the library rotate; a
+    #: comma-separated list pins them, e.g. ``google,bing,brave``. Measured on
+    #: Vietnamese queries, mojeek/startpage/wikipedia return nothing useful.
+    ddgs_engines: str = "auto"
+    #: Candidates gathered from the engine, before page reading narrows them down.
     max_results: Annotated[int, Field(ge=1, le=15)] = 5
     timeout_s: Annotated[float, Field(gt=1, le=120)] = 15.0
     region: str = "vn-vi"
@@ -327,6 +368,37 @@ class WebSearchToolConfig(_Base):
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
     )
+    #: How many top results to actually open and read. 0 = snippets only (fastest).
+    read_pages: Annotated[int, Field(ge=0, le=5)] = 2
+    #: Body text kept per page.
+    page_chars: Annotated[int, Field(ge=200, le=6000)] = 1200
+    #: Total size of the material handed to the model. Must stay within its context.
+    context_chars: Annotated[int, Field(ge=400, le=8000)] = 2600
+    #: Per-page timeout, deliberately shorter than ``timeout_s``: a slow page must not
+    #: stall a spoken turn.
+    page_timeout_s: Annotated[float, Field(gt=0.5, le=60)] = 8.0
+
+    def resolved_brave_api_key(self) -> str:
+        """The Brave token from the environment, falling back to the config file.
+
+        Environment first on purpose: ``config.yaml`` is committed, so a key written
+        there would end up in git history. Keeping the lookup a method rather than a
+        field means the secret is never part of ``model_dump()`` output either, which
+        is what ``jarvis doctor`` and the debug logs print.
+        """
+        for name in BRAVE_API_KEY_ENV_VARS:
+            value = (os.environ.get(name) or "").strip()
+            if value:
+                return value
+        return (self.brave_api_key or "").strip()
+
+    @field_validator("brave_country", "brave_search_lang")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("không được để trống")
+        return value
 
 
 class BrowserUseToolConfig(_Base):

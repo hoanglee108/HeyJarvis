@@ -3,7 +3,7 @@
 > **Tài liệu tầm nhìn ban đầu.** Một số quyết định kỹ thuật ở đây đã thay đổi sau khi
 > triển khai thực tế: LLM hiện là `nvidia/nemotron-3-nano-4b` (không phải Qwen2.5-3B),
 > và Jarvis gọi LM Studio qua REST OpenAI-compatible thay vì SDK `lmstudio-python`.
-> Xem [`structure.md`](structure.md) để biết kiến trúc đang chạy và lý do thay đổi.
+> Xem [`README.md`](README.md) để biết kiến trúc đang chạy và lý do thay đổi.
 
 ## 1. Vision
 

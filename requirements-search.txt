@@ -1,0 +1,11 @@
+# Optional metasearch backend. Install separately from requirements.txt, and only if
+# you set `tools.web_search.backend: ddgs` in config. The default `duckduckgo` backend
+# needs nothing beyond requests/beautifulsoup4/lxml already in requirements.txt.
+#
+# Why it exists: scraping a single engine gets rate-limited. DuckDuckGo answered
+# HTTP 202 with a bot-check page for hours during testing, while ddgs still returned
+# results from Bing, Google, Brave and Yandex.
+#
+# Note: ddgs pulls in `primp`, a compiled Rust HTTP client. That is the only native
+# component this adds; everything else in the core stack is pure Python or a common wheel.
+ddgs==9.16.0

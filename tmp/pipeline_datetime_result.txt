@@ -1,4 +1,0 @@
-text='mấy giờ rồi' datetime_shortcut='Wednesday, 12/08/2026 21:20'
-text='hôm nay là ngày mấy' datetime_shortcut='Wednesday, 12/08/2026 21:20'
-text='thứ mấy hôm nay' datetime_shortcut='Wednesday, 12/08/2026 21:20'
-text='thời tiết hôm nay thế nào' datetime_shortcut=None
