@@ -16,3 +16,4 @@ tmp/
 
 # Local overrides
 config.local.yaml
+priority.md

@@ -28,6 +28,12 @@ Pillow==11.1.0
 
 # --- desktop automation / media keys ---
 PyAutoGUI==0.9.54
+# --- per-application volume (ducking while Jarvis listens) ---
+# Windows audio session API wrapper. Without it Jarvis still runs; ducking just
+# turns itself off with a warning (see jarvis/ducking.py).
+pycaw==20251023
+comtypes==1.4.16
+psutil==7.2.2
 
 # --- web search ---
 requests==2.32.3

@@ -7,11 +7,15 @@ and that no single failure crashes the pipeline.
 
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 import pytest
 
 from jarvis.audio import AudioError
-from jarvis.config import JarvisConfig
+from jarvis.config import DuckingConfig, JarvisConfig
+from jarvis.ducking import VolumeDucker
 from jarvis.llm import LlmError, LlmUnavailableError
 from jarvis.pipeline import Pipeline
 from jarvis.state import State, StateMachine
@@ -35,22 +39,29 @@ class SpeechRecorder:
         return type("R", (), {"samples": np.zeros(10), "sample_rate": 22050, "duration": 0.1})()
 
 
-@pytest.fixture
-def pipeline(real_config: JarvisConfig, monkeypatch: pytest.MonkeyPatch) -> Pipeline:
+def build_pipeline(config: JarvisConfig, monkeypatch: pytest.MonkeyPatch) -> Pipeline:
     states: list[State] = []
     machine = StateMachine(State.IDLE)
     machine.subscribe(lambda state, _detail: states.append(state))
 
-    pipe = Pipeline(real_config, machine)
+    pipe = Pipeline(config, machine)
     pipe.states_seen = states  # type: ignore[attr-defined]
 
-    # Never touch real hardware or models.
+    # Never touch real hardware or models. Ducking counts as hardware: the real config
+    # enables it, and a live VolumeDucker would move the volume of whatever the
+    # developer happens to be playing while the suite runs.
     pipe.mic = FakeMic([])  # type: ignore[assignment]
     pipe.tts = SpeechRecorder()  # type: ignore[assignment]
+    pipe.ducker = VolumeDucker(DuckingConfig(enabled=False))
     monkeypatch.setattr(pipe.speaker, "beep", lambda *a, **k: None)
     monkeypatch.setattr(pipe.speaker, "play", lambda *a, **k: None)
     pipe._tool_defs = []  # noqa: SLF001 - skip lmstudio tool schema building
     return pipe
+
+
+@pytest.fixture
+def pipeline(real_config: JarvisConfig, monkeypatch: pytest.MonkeyPatch) -> Pipeline:
+    return build_pipeline(real_config, monkeypatch)
 
 
 # -- happy path -----------------------------------------------------------------------
@@ -270,3 +281,214 @@ def test_request_stop_flags_the_loop(pipeline: Pipeline) -> None:
     assert not pipeline.stopping
     pipeline.request_stop()
     assert pipeline.stopping
+
+
+# -- streamed replies (priority.md P1-1) -----------------------------------------------
+def streaming_act(reply: str, *, chunk_size: int = 7):
+    """Fake ``llm.act`` that dribbles ``reply`` into the sink like a real stream."""
+
+    def act(_prompt, _tools=None, *, sink=None, **_kwargs):  # noqa: ANN202
+        if sink is not None:
+            for start in range(0, len(reply), chunk_size):
+                sink.push(reply[start : start + chunk_size])
+        return reply
+
+    return act
+
+
+def test_streamed_reply_is_spoken_sentence_by_sentence(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reply = "Bây giờ là chín giờ sáng. Trời hôm nay khá đẹp. Bạn nên ra ngoài đi bộ."
+    monkeypatch.setattr(pipeline.llm, "act", streaming_act(reply))
+
+    result = pipeline.respond_to_text("kể tôi nghe một câu chuyện")
+
+    assert result.reply == reply
+    assert result.spoken is True
+    # Three separate synthesis calls: the first one starts playing while the model is
+    # still writing the rest. That is the whole point of P1-1.
+    assert pipeline.tts.said == [  # type: ignore[attr-defined]
+        "Bây giờ là chín giờ sáng.",
+        "Trời hôm nay khá đẹp.",
+        "Bạn nên ra ngoài đi bộ.",
+    ]
+
+
+def test_streamed_reply_is_never_spoken_twice(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback to a plain ``say`` must not re-read what was already played."""
+    reply = "Tôi đã mở thư mục tải xuống cho bạn rồi nhé."
+    monkeypatch.setattr(pipeline.llm, "act", streaming_act(reply))
+
+    pipeline.respond_to_text("mở thư mục tải xuống")
+
+    said = pipeline.tts.said  # type: ignore[attr-defined]
+    assert said.count(reply) <= 1
+    assert len(said) == 1
+
+
+def test_streamed_turn_reaches_speaking_then_idle(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline.llm, "act", streaming_act("Chào bạn, tôi nghe đây nhé."))
+
+    pipeline.respond_to_text("xin chào")
+
+    seen = pipeline.states_seen  # type: ignore[attr-defined]
+    assert State.THINKING in seen
+    assert State.SPEAKING in seen
+    assert seen[-1] is State.IDLE
+
+
+def test_reply_with_no_speakable_content_falls_back_to_say(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing was streamed to the speaker, so the plain path has to take over."""
+
+    def act(_prompt, _tools=None, *, sink=None, **_kwargs):  # noqa: ANN202
+        if sink is not None:
+            sink.push("<think>chỉ có suy luận, không có câu trả lời</think>")
+        return "Đây mới là câu trả lời thật."
+
+    monkeypatch.setattr(pipeline.llm, "act", act)
+
+    result = pipeline.respond_to_text("xin chào")
+
+    assert result.spoken is True
+    assert pipeline.tts.said == ["Đây mới là câu trả lời thật."]  # type: ignore[attr-defined]
+
+
+def test_streaming_disabled_speaks_the_whole_reply_at_once(
+    config_copy: JarvisConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_copy.llm.stream = False
+    pipe = build_pipeline(config_copy, monkeypatch)
+    reply = "Câu một ở đây. Câu hai ở đây."
+    monkeypatch.setattr(pipe.llm, "act", streaming_act(reply))
+
+    result = pipe.respond_to_text("xin chào")
+
+    assert result.spoken is True
+    assert pipe.tts.said == [reply]  # type: ignore[attr-defined]
+
+
+def test_llm_failure_during_streaming_does_not_leak_the_speech_thread(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = threading.active_count()
+
+    def boom(_prompt, _tools=None, *, sink=None, **_kwargs):  # noqa: ANN202
+        if sink is not None:
+            sink.push("Một phần câu trả lời")
+        raise LlmError("mất kết nối giữa lúc trả lời")
+
+    monkeypatch.setattr(pipeline.llm, "act", boom)
+
+    result = pipeline.respond_to_text("xin chào")
+
+    assert not result.ok
+    assert pipeline.tts.said[-1] == pipeline.config.replies.generic_error  # type: ignore[attr-defined]
+    deadline = time.monotonic() + 5.0
+    while threading.active_count() > before and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert threading.active_count() <= before, "luồng phát giọng nói bị rò"
+
+
+def test_unexpected_exception_still_closes_the_speech_worker(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = threading.active_count()
+
+    def boom(_prompt, _tools=None, *, sink=None, **_kwargs):  # noqa: ANN202
+        raise RuntimeError("lỗi không ai lường trước")
+
+    monkeypatch.setattr(pipeline.llm, "act", boom)
+
+    with pytest.raises(RuntimeError):
+        pipeline.respond_to_text("xin chào")
+
+    deadline = time.monotonic() + 5.0
+    while threading.active_count() > before and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert threading.active_count() <= before
+
+
+# -- ducking is wired to the right phases (priority.md P1-3) ---------------------------
+class DuckSpy:
+    """Counts acquire/release without touching the system volume."""
+
+    def __init__(self) -> None:
+        self.acquires = 0
+        self.releases = 0
+        self.restores = 0
+        self.enabled = True
+
+    def acquire(self) -> None:
+        self.acquires += 1
+
+    def release(self) -> None:
+        self.releases += 1
+
+    def restore_all(self) -> None:
+        self.restores += 1
+
+    def ducked(self, *, active: bool = True):  # noqa: ANN202
+        from contextlib import contextmanager
+
+        @contextmanager
+        def scope():  # noqa: ANN202
+            if active:
+                self.acquire()
+            try:
+                yield
+            finally:
+                if active:
+                    self.release()
+
+        return scope()
+
+
+def test_waiting_for_the_wake_word_never_ducks(pipeline: Pipeline) -> None:
+    """Standby can last for hours; holding the music down through it is unacceptable."""
+    spy = DuckSpy()
+    pipeline.ducker = spy  # type: ignore[assignment]
+    pipeline.mic = FakeMic([speech_frame()] * 12 + [silence_frame()] * 30)  # type: ignore[assignment]
+    pipeline._speech_threshold = 0.05  # noqa: SLF001
+
+    pipeline._capture(use_pre_roll=False, duck=False)  # noqa: SLF001
+
+    assert spy.acquires == 0
+
+
+def test_capturing_a_command_ducks_and_restores(pipeline: Pipeline) -> None:
+    spy = DuckSpy()
+    pipeline.ducker = spy  # type: ignore[assignment]
+    pipeline.mic = FakeMic([speech_frame()] * 12 + [silence_frame()] * 30)  # type: ignore[assignment]
+    pipeline._speech_threshold = 0.05  # noqa: SLF001
+
+    pipeline._capture(use_pre_roll=False, duck=True)  # noqa: SLF001
+
+    assert spy.acquires == 1
+    assert spy.releases == 1
+
+
+def test_close_restores_the_volume(pipeline: Pipeline) -> None:
+    spy = DuckSpy()
+    pipeline.ducker = spy  # type: ignore[assignment]
+    pipeline.close()
+    assert spy.restores == 1
+
+
+def test_streamed_playback_releases_the_duck_exactly_once(
+    pipeline: Pipeline, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy = DuckSpy()
+    pipeline.ducker = spy  # type: ignore[assignment]
+    monkeypatch.setattr(pipeline.llm, "act", streaming_act("Một câu trả lời đủ dài đây."))
+
+    pipeline.respond_to_text("xin chào")
+
+    assert spy.acquires == 1
+    assert spy.releases == 1

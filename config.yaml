@@ -92,15 +92,33 @@ audio:
   # Dành đủ thời gian nói hết câu sau wake word; VAD vẫn dừng sớm khi im lặng.
   max_record_seconds: 30
   min_record_seconds: 0.6
-  silence_timeout_ms: 1800
+  # 800 ms là đủ với VAD thần kinh; ngưỡng RMS cũ cần tới 1800 ms vì nó không đáng
+  # tin. Đây là khoản trễ chết sau MỖI câu nên đáng để hạ.
+  silence_timeout_ms: 800
   start_timeout_seconds: 10
-  silence_rms_threshold: null   # null = tự hiệu chuẩn theo tiếng ồn nền
+  # Cổng phát hiện giọng nói:
+  #   silero = VAD thần kinh (đi kèm openWakeWord), phân biệt được giọng với nhạc
+  #   energy = ngưỡng RMS cũ, luôn coi nhạc là giọng nói -> ghi âm không bao giờ dừng
+  vad_backend: silero
+  vad_threshold: 0.5
+  vad_min_rms: 0.0              # >0 = thêm veto theo âm lượng; 0 = tin hẳn mô hình
+  vad_num_threads: 1
+  silence_rms_threshold: null   # null = tự hiệu chuẩn; chỉ dùng khi vad_backend=energy
   calibration_seconds: 1.0
   calibration_multiplier: 2.0
   calibration_floor_minimum: 0.003
   pre_roll_ms: 500
   # Không phát beep để tránh bỏ lỡ các từ đầu tiên người dùng nói ngay sau wake word.
   beep_on_listen: false
+  # Hạ âm lượng riêng app đang phát nhạc trong lúc Jarvis nghe/nói. Không chạm vào
+  # tiếng của chính Jarvis, và không bao giờ hạ khi đang chờ câu đánh thức.
+  ducking:
+    enabled: true
+    level: 0.15
+    while_speaking: true
+    restore_ms: 250
+    processes: []               # [] = mọi app đang phát, trừ Jarvis
+    exclude_processes: []
 
 # --------------------------------------------------------------------------------------
 # Tools mà LLM được phép gọi

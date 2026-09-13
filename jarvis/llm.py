@@ -26,7 +26,7 @@ import re
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from .config import LlmConfig
 from .logging_setup import get_logger
@@ -54,6 +54,26 @@ class LlmError(RuntimeError):
 
 class LlmUnavailableError(LlmError):
     """LM Studio is offline, the server is not started, or the model is missing."""
+
+
+class _StreamStartError(LlmError):
+    """Streaming was refused before any token arrived, so retrying is safe.
+
+    Distinguished from a mid-stream failure on purpose: once text has been handed to the
+    sink it may already have been spoken, and replaying the request would say it twice.
+    """
+
+
+class TextSink(Protocol):
+    """Consumer of streamed answer text; see :class:`jarvis.streaming.StreamingSpeaker`.
+
+    Declared here rather than in :mod:`jarvis.streaming` to keep the dependency pointing
+    one way: streaming knows about the LLM, not the reverse.
+    """
+
+    def push(self, chunk: str) -> None: ...
+
+    def discard_pending(self) -> None: ...
 
 
 # --------------------------------------------------------------------------------------
@@ -176,6 +196,8 @@ class LLMClient:
         self._config = config
         self._session: Any = None
         self._connected = False
+        #: Cleared for the session if the server refuses a streaming request.
+        self._stream_supported = True
         self._lock = threading.RLock()
         #: Rolling conversation memory as ``(role, text)`` pairs.
         self._history: list[tuple[str, str]] = []
@@ -329,6 +351,7 @@ class LLMClient:
         self,
         messages: list[dict[str, Any]],
         tools: Sequence[ToolSpec] | None = None,
+        sink: TextSink | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._config.model,
@@ -340,6 +363,17 @@ class LLMClient:
         if tools:
             payload["tools"] = [spec.to_openai_schema() for spec in tools]
             payload["tool_choice"] = "auto"
+
+        if sink is not None and self._config.stream and self._stream_supported:
+            payload["stream"] = True
+            try:
+                return self._stream_completion(payload, sink)
+            except _StreamStartError as exc:
+                # The server rejected the streaming request outright; nothing was
+                # spoken, so falling back for the rest of the session is safe.
+                self._stream_supported = False
+                log.warning("LM Studio không nhận stream (%s); dùng chế độ thường.", exc)
+            payload["stream"] = False
 
         body = self._request("POST", "/chat/completions", payload)
         choices = body.get("choices") or []
@@ -355,10 +389,133 @@ class LLMClient:
             "finish_reason": choices[0].get("finish_reason"),
         }
 
+    # -- streamed completion -----------------------------------------------------
+    def _stream_completion(self, payload: dict[str, Any], sink: TextSink) -> dict[str, Any]:
+        """Consume a server-sent-event completion, forwarding answer text to ``sink``.
+
+        Reasoning deltas arrive in their own ``reasoning_content`` field and are counted
+        but never forwarded. Tool-call deltas are reassembled by index, and the first one
+        switches forwarding off: text that accompanies a tool call belongs to the call,
+        not to the spoken answer.
+        """
+        import requests
+
+        url = f"{self.base_url}/chat/completions"
+        try:
+            response = self._http().post(
+                url,
+                json=payload,
+                timeout=self._config.request_timeout_s,
+                stream=True,
+            )
+        except requests.Timeout as exc:
+            raise _StreamStartError(
+                f"LM Studio không phản hồi trong {self._config.request_timeout_s:.0f}s"
+            ) from exc
+        except requests.RequestException as exc:
+            raise self._as_unavailable(exc) from exc
+
+        if response.status_code >= 400:
+            error = self._as_http_error(response)
+            response.close()
+            if isinstance(error, LlmUnavailableError):
+                raise error
+            raise _StreamStartError(str(error)) from error
+
+        content: list[str] = []
+        calls: dict[int, dict[str, Any]] = {}
+        finish_reason: str | None = None
+        reasoning_chars = 0
+        forwarding = True
+
+        try:
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                line = raw_line.strip()
+                if line.startswith("data:"):
+                    line = line[len("data:") :].strip()
+                if not line:
+                    continue
+                if line == "[DONE]":
+                    break
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    log.debug("Bỏ qua một dòng stream không phải JSON: %r", line[:120])
+                    continue
+
+                choices = event.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+                delta = choice.get("delta") or choice.get("message") or {}
+
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if reasoning:
+                    reasoning_chars += len(reasoning)
+
+                for call in delta.get("tool_calls") or []:
+                    if forwarding:
+                        forwarding = False
+                        sink.discard_pending()
+                    self._merge_tool_call_delta(calls, call)
+
+                text = delta.get("content") or ""
+                if text:
+                    content.append(text)
+                    if forwarding:
+                        sink.push(text)
+        except requests.RequestException as exc:
+            raise LlmError(f"Mất kết nối giữa lúc nhận stream từ LM Studio: {exc}") from exc
+        finally:
+            response.close()
+
+        if reasoning_chars:
+            log.debug("Reasoning (%d ký tự, không đọc ra loa)", reasoning_chars)
+
+        tool_calls = [
+            call
+            for _index, call in sorted(calls.items())
+            if (call.get("function") or {}).get("name")
+        ]
+        return {
+            "text": strip_reasoning("".join(content)),
+            "tool_calls": tool_calls,
+            "finish_reason": finish_reason,
+        }
+
+    @staticmethod
+    def _merge_tool_call_delta(
+        calls: dict[int, dict[str, Any]], delta: dict[str, Any]
+    ) -> None:
+        """Accumulate one streamed tool-call fragment into ``calls``.
+
+        Arguments arrive as a JSON string split across deltas, so they are concatenated;
+        ``id`` and ``name`` normally arrive whole in the first fragment.
+        """
+        index = int(delta.get("index") or 0)
+        slot = calls.setdefault(
+            index,
+            {"id": None, "type": "function", "function": {"name": "", "arguments": ""}},
+        )
+        if delta.get("id"):
+            slot["id"] = delta["id"]
+        if delta.get("type"):
+            slot["type"] = delta["type"]
+        function = delta.get("function") or {}
+        if function.get("name"):
+            slot["function"]["name"] = function["name"]
+        if function.get("arguments"):
+            slot["function"]["arguments"] += function["arguments"]
+
     def _complete_answer(
         self,
         messages: list[dict[str, Any]],
         tools: Sequence[ToolSpec] | None = None,
+        sink: TextSink | None = None,
     ) -> dict[str, Any]:
         """Complete, retrying when the model produces nothing at all.
 
@@ -366,20 +523,22 @@ class LLMClient:
         three tokens, with ``finish_reason: stop``. It is not a truncation and not an
         error, just a dead turn, and retrying the same request usually resolves it.
         """
-        step = self._complete(messages, tools)
+        step = self._complete(messages, tools, sink)
         for attempt in range(1, self._config.empty_reply_retries + 1):
             if step["text"] or step["tool_calls"]:
                 return step
+            # Nothing was produced, so nothing reached the speaker either: retrying
+            # cannot duplicate spoken audio.
             log.warning("Model trả lời rỗng, thử lại lần %d", attempt)
             retry = messages if attempt == 1 else [*messages, {"role": "user", "content": ANSWER_NUDGE}]
-            step = self._complete(retry, tools)
+            step = self._complete(retry, tools, sink)
         return step
 
     # -- inference ---------------------------------------------------------------
-    def chat(self, prompt: str, *, remember: bool = True) -> str:
+    def chat(self, prompt: str, *, remember: bool = True, sink: TextSink | None = None) -> str:
         """Single-turn (plus history) completion without tools."""
         self.connect()
-        answer = self._complete_answer(self._build_messages(prompt))["text"]
+        answer = self._complete_answer(self._build_messages(prompt), sink=sink)["text"]
         if remember and answer:
             self._remember(prompt, answer)
         log.debug("LLM chat -> %r", answer)
@@ -392,11 +551,16 @@ class LLMClient:
         *,
         remember: bool = True,
         on_round: Callable[[int], None] | None = None,
+        sink: TextSink | None = None,
     ) -> str:
-        """Run the tool-calling loop and return the final spoken answer."""
+        """Run the tool-calling loop and return the final spoken answer.
+
+        When ``sink`` is given, answer text is streamed to it sentence by sentence as the
+        model writes it, so playback starts before the reply is finished.
+        """
         tool_list = list(tools)
         if not tool_list:
-            return self.chat(prompt, remember=remember)
+            return self.chat(prompt, remember=remember, sink=sink)
 
         self.connect()
         by_name = {spec.name: spec for spec in tool_list}
@@ -406,7 +570,7 @@ class LLMClient:
         for round_index in range(1, self._config.max_tool_rounds + 1):
             if on_round is not None:
                 on_round(round_index)
-            step = self._complete_answer(messages, tool_list)
+            step = self._complete_answer(messages, tool_list, sink)
             calls = step["tool_calls"]
 
             if not calls:
@@ -453,7 +617,7 @@ class LLMClient:
                 ),
             }
         )
-        answer = self._complete_answer(messages)["text"] or speakable(last_tool_result)
+        answer = self._complete_answer(messages, sink=sink)["text"] or speakable(last_tool_result)
         if remember and answer:
             self._remember(prompt, answer)
         return answer

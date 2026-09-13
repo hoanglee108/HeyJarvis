@@ -25,13 +25,16 @@ from .audio import (
     write_wav,
 )
 from .config import JarvisConfig
+from .ducking import VolumeDucker
 from .intents import IntentRouter
 from .llm import LLMClient, LlmError, LlmUnavailableError, ToolSpec
 from .logging_setup import get_logger
 from .state import State, StateMachine
+from .streaming import StreamingSpeaker
 from .stt import SpeechToText, SttError
 from .tools import ToolBox
 from .tts import TextToSpeech, TtsError
+from .vad import SpeechGate, build_speech_gate
 from .wakeword import WakeWordDetector, WakeWordError
 
 log = get_logger("jarvis.pipeline")
@@ -67,10 +70,18 @@ class Pipeline:
         self.intents = IntentRouter(self.tools)
         self.wake = WakeWordDetector(config.wake_word)
         self.mic = MicStream(config.audio)
+        self.ducker = VolumeDucker(config.audio.ducking)
 
         self._stop_event = threading.Event()
         self._speech_threshold = config.audio.silence_rms_threshold or 0.01
+        #: Built in :meth:`_prepare_mic`, once the noise floor is known.
+        self._gate: SpeechGate | None = None
         self._tool_defs: list[ToolSpec] | None = None
+        #: State captured when streamed playback starts, restored when it ends.
+        self._stream_previous_state = State.IDLE
+        self._stream_previous_detail: str | None = None
+        #: True while a streamed reply holds a duck, so it is released exactly once.
+        self._stream_ducked = False
 
     # ----------------------------------------------------------------------------
     # lifecycle
@@ -102,6 +113,9 @@ class Pipeline:
 
     def close(self) -> None:
         self.request_stop()
+        # Before anything else: leaving somebody's music at 15% would be a nasty
+        # parting gift if we are shutting down mid-turn.
+        self.ducker.restore_all()
         self.mic.stop()
         self.llm.close()
         self.state.set(State.STOPPED)
@@ -127,26 +141,40 @@ class Pipeline:
         previous_detail = self.state.detail
         self.state.set(State.SPEAKING, text[:60])
         try:
-            self.tts.speak(text)
+            with self.ducker.ducked(active=self.config.audio.ducking.while_speaking):
+                self.tts.speak(text)
             return True
         except (TtsError, AudioError) as exc:
             log.error("Không nói được: %s", exc)
             print(f"[Jarvis] {text}")  # last-resort feedback channel
             return False
         finally:
-            # Keep an ERROR indication visible; otherwise restore the requested
-            # conversation state or go back to ordinary wake-word standby.
-            if previous is State.ERROR:
-                self.state.set(State.ERROR, previous_detail)
-            elif resume_state is not None:
-                self.state.set(resume_state)
-            elif previous is not State.SPEAKING:
-                self.state.set(State.IDLE)
-            # Discard the audio the microphone picked up from our own voice.
-            if self.mic.running:
-                self.mic.drain()
-                if self.wake.loaded:
-                    self.wake.reset()
+            self._after_speaking(previous, previous_detail, resume_state)
+
+    def _after_speaking(
+        self,
+        previous: State,
+        previous_detail: str | None,
+        resume_state: State | None,
+    ) -> None:
+        """State restoration and microphone cleanup shared by every speaking path."""
+        # Keep an ERROR indication visible; otherwise restore the requested
+        # conversation state or go back to ordinary wake-word standby.
+        if previous is State.ERROR:
+            self.state.set(State.ERROR, previous_detail)
+        elif resume_state is not None:
+            self.state.set(resume_state)
+        elif previous is not State.SPEAKING:
+            self.state.set(State.IDLE)
+        # Discard the audio the microphone picked up from our own voice.
+        if self.mic.running:
+            self.mic.drain()
+            if self.wake.loaded:
+                self.wake.reset()
+            if self._gate is not None:
+                # Silero carries LSTM state; after a gap in the audio timeline it must
+                # not keep reasoning from frames that were thrown away.
+                self._gate.reset()
 
     # ----------------------------------------------------------------------------
     # one turn
@@ -174,32 +202,107 @@ class Pipeline:
         if self._tool_defs is None:
             self._tool_defs = self.tools.build_tool_defs()
 
+        speaker = self._start_streaming_speech()
         try:
-            reply = self.llm.act(text, self._tool_defs)
-        except LlmUnavailableError as exc:
-            log.error("LM Studio không khả dụng: %s", exc)
-            result.error = str(exc)
-            self.state.set(State.ERROR, "LM Studio offline")
-            result.spoken = self.say(self.config.replies.llm_unavailable, resume_state=resume_state)
-            return result
-        except LlmError as exc:
-            log.error("Lỗi LLM: %s", exc)
-            result.error = str(exc)
-            self.state.set(State.ERROR, "lỗi LLM")
-            result.spoken = self.say(self.config.replies.generic_error, resume_state=resume_state)
-            return result
+            try:
+                reply = self.llm.act(text, self._tool_defs, sink=speaker)
+            except LlmUnavailableError as exc:
+                log.error("LM Studio không khả dụng: %s", exc)
+                result.error = str(exc)
+                self.state.set(State.ERROR, "LM Studio offline")
+                result.spoken = self.say(
+                    self.config.replies.llm_unavailable, resume_state=resume_state
+                )
+                return result
+            except LlmError as exc:
+                log.error("Lỗi LLM: %s", exc)
+                result.error = str(exc)
+                self.state.set(State.ERROR, "lỗi LLM")
+                result.spoken = self.say(
+                    self.config.replies.generic_error, resume_state=resume_state
+                )
+                return result
 
-        result.tools_used = list(self.tools.last_used)
-        if not reply:
-            result.error = "LLM trả về nội dung rỗng"
-            result.spoken = self.say(self.config.replies.generic_error, resume_state=resume_state)
-            return result
+            result.tools_used = list(self.tools.last_used)
+            if not reply:
+                result.error = "LLM trả về nội dung rỗng"
+                result.spoken = self.say(
+                    self.config.replies.generic_error, resume_state=resume_state
+                )
+                return result
 
-        result.reply = reply
-        result.spoken = self.say(reply, resume_state=resume_state)
-        if not keep_listening:
-            self.state.set(State.IDLE)
-        return result
+            result.reply = reply
+            result.spoken = self._finish_streaming_speech(
+                speaker, reply, resume_state=resume_state
+            )
+            if not keep_listening:
+                self.state.set(State.IDLE)
+            return result
+        finally:
+            # Every exit path, including an unplanned exception, must stop the speech
+            # worker and give the music back.
+            self._close_streaming_speech(speaker)
+
+    # ----------------------------------------------------------------------------
+    # streaming speech (priority.md P1-1)
+    # ----------------------------------------------------------------------------
+    def _start_streaming_speech(self) -> StreamingSpeaker | None:
+        """A sink that speaks the answer as it is written, or ``None`` when disabled."""
+        if not self.config.llm.stream:
+            return None
+        speaker = StreamingSpeaker(self.tts, on_first_audio=self._on_stream_first_audio)
+        speaker.start()
+        return speaker
+
+    def _on_stream_first_audio(self) -> None:
+        """Called on the speech worker thread, just before the first sentence plays."""
+        self._stream_previous_state = self.state.state
+        self._stream_previous_detail = self.state.detail
+        self.state.set(State.SPEAKING, "đang trả lời")
+        if self.config.audio.ducking.while_speaking:
+            self.ducker.acquire()
+            self._stream_ducked = True
+
+    def _close_streaming_speech(self, speaker: StreamingSpeaker | None) -> None:
+        """Idempotent cleanup: stop the worker and undo the duck exactly once."""
+        if speaker is not None:
+            speaker.ensure_closed()
+        if self._stream_ducked:
+            self._stream_ducked = False
+            self.ducker.release()
+
+    def _finish_streaming_speech(
+        self,
+        speaker: StreamingSpeaker | None,
+        reply: str,
+        *,
+        resume_state: State | None,
+    ) -> bool:
+        """Wait for streamed playback; fall back to a normal ``say`` when it spoke nothing.
+
+        The fallback is only safe *because* nothing was spoken. Re-speaking a reply that
+        was already half played would repeat sentences, which is why this branches on
+        ``spoken_any`` rather than on whether an error occurred.
+        """
+        if speaker is None:
+            return self.say(reply, resume_state=resume_state)
+
+        previous = self._stream_previous_state
+        previous_detail = self._stream_previous_detail
+        ok = speaker.finish(timeout=self.config.llm.request_timeout_s)
+
+        if not speaker.spoken_any:
+            # No audio at all: a markup-only reply, or synthesis failed before the first
+            # sentence, or the server never streamed. Speak it the old way.
+            if speaker.error is not None:
+                log.warning("Streaming TTS lỗi trước khi phát: %s", speaker.error)
+            return self.say(reply, resume_state=resume_state)
+
+        if speaker.error is not None:
+            log.error("Dừng giữa câu trả lời: %s", speaker.error)
+            print(f"[Jarvis] {reply}")
+        self._after_speaking(previous, previous_detail, resume_state)
+        return ok
 
     @staticmethod
     def _normalise_phrase(text: str) -> str:
@@ -291,11 +394,16 @@ class Pipeline:
         *,
         use_pre_roll: bool,
         prompt_on_no_speech: bool = True,
+        duck: bool = False,
     ) -> np.ndarray | None:
         """Record one utterance; ``None`` when nobody spoke.
 
         A continuous conversation keeps listening silently when the user pauses;
         ordinary wake-word mode retains the existing spoken retry prompt.
+
+        ``duck`` lowers other apps' volume for the duration. It must stay False while
+        waiting for the wake word - that phase can run for hours, and holding the music
+        down through all of it would be absurd.
         """
         self.state.set(State.LISTENING)
         if self.config.audio.beep_on_listen:
@@ -303,12 +411,14 @@ class Pipeline:
             self.mic.drain()
 
         pre_roll = self.mic.recent(self.config.audio.pre_roll_ms) if use_pre_roll else None
-        recording = record_utterance(
-            self.mic,
-            self.config.audio,
-            speech_threshold=self._speech_threshold,
-            pre_roll=pre_roll,
-        )
+        with self.ducker.ducked(active=duck):
+            recording = record_utterance(
+                self.mic,
+                self.config.audio,
+                gate=self._gate,
+                speech_threshold=self._speech_threshold,
+                pre_roll=pre_roll,
+            )
         if recording.reason == "no_speech":
             if prompt_on_no_speech:
                 log.info("Không có ai nói, quay lại chờ")
@@ -333,6 +443,10 @@ class Pipeline:
     def _prepare_mic(self) -> None:
         self.mic.start()
         self._speech_threshold = calibrate_noise_floor(self.mic, self.config.audio)
+        self._gate = build_speech_gate(
+            self.config.audio, energy_threshold=self._speech_threshold
+        )
+        log.info("Cổng phát hiện giọng nói: %s", self._gate.describe())
 
     def run_push_to_talk(self) -> None:
         """Task 5 loop: press Enter, speak, get an answer. No wake word."""
@@ -348,7 +462,7 @@ class Pipeline:
                 break
             self.mic.drain()
             try:
-                samples = self._capture(use_pre_roll=False)
+                samples = self._capture(use_pre_roll=False, duck=True)
             except AudioError as exc:
                 log.error("Lỗi mic: %s", exc)
                 self.say(self.config.replies.mic_error)
@@ -371,6 +485,7 @@ class Pipeline:
                 samples = self._capture(
                     use_pre_roll=use_pre_roll,
                     prompt_on_no_speech=False,
+                    duck=True,
                 )
             except AudioError as exc:
                 log.error("Lỗi mic khi ghi âm: %s", exc)

@@ -100,6 +100,33 @@ class WakeWordConfig(_Base):
 # --------------------------------------------------------------------------------------
 # Audio capture / playback
 # --------------------------------------------------------------------------------------
+class DuckingConfig(_Base):
+    """Lower the *other* apps' volume while Jarvis is listening (priority.md P1-3).
+
+    Windows exposes per-application volume through the audio session API, so the music
+    player can be attenuated without touching Jarvis's own playback. This is the same
+    split smart speakers use: echo cancellation only has to get the wake word through,
+    while the command itself is captured with the content turned down.
+    """
+
+    enabled: bool = False
+    #: Volume applied to matching sessions while listening (0..1).
+    level: Annotated[float, Field(ge=0.0, le=1.0)] = 0.15
+    #: Duck during TTS playback too, so music does not bury Jarvis's own voice.
+    while_speaking: bool = True
+    #: Ramp length when restoring, so the music fades back instead of jumping.
+    restore_ms: Annotated[int, Field(ge=0, le=2000)] = 250
+    #: Executable names to duck. Empty = every session that is not Jarvis itself.
+    processes: list[str] = Field(default_factory=list)
+    #: Never touched, even when they match ``processes``.
+    exclude_processes: list[str] = Field(default_factory=list)
+
+    @field_validator("processes", "exclude_processes")
+    @classmethod
+    def _normalise_process_names(cls, value: list[str]) -> list[str]:
+        return [name.strip().lower() for name in value if name.strip()]
+
+
 class AudioConfig(_Base):
     #: ``None`` = system default. Can be an index (int) or a substring of the device name.
     input_device: int | str | None = None
@@ -113,8 +140,18 @@ class AudioConfig(_Base):
     silence_timeout_ms: Annotated[int, Field(ge=100, le=10_000)] = 900
     #: Give the speaker this long to start talking before giving up.
     start_timeout_seconds: Annotated[float, Field(gt=0.2, le=30)] = 6.0
+    #: Speech gate used to segment an utterance. ``energy`` is the original RMS
+    #: threshold; ``silero`` is the neural VAD bundled with openWakeWord and is what
+    #: keeps recording usable while music plays (priority.md P1-2).
+    vad_backend: Literal["energy", "silero"] = "energy"
+    #: Silero speech probability above which a frame counts as speech.
+    vad_threshold: Annotated[float, Field(gt=0.0, lt=1.0)] = 0.5
+    #: Optional extra RMS veto on top of Silero; 0 = trust the model alone.
+    vad_min_rms: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
+    vad_num_threads: Annotated[int, Field(ge=1, le=8)] = 1
     #: RMS (0..1 float scale) above which a frame counts as speech.
     #: ``None`` -> auto-calibrated from ambient noise at startup.
+    #: Still used as the fallback gate when ``vad_backend`` is ``energy``.
     silence_rms_threshold: float | None = None
     #: Ambient-noise calibration window used when ``silence_rms_threshold`` is None.
     calibration_seconds: Annotated[float, Field(ge=0.1, le=10)] = 1.0
@@ -125,6 +162,7 @@ class AudioConfig(_Base):
     pre_roll_ms: Annotated[int, Field(ge=0, le=2000)] = 300
     #: Play a short beep when Jarvis starts listening.
     beep_on_listen: bool = True
+    ducking: DuckingConfig = Field(default_factory=DuckingConfig)
 
 
 # --------------------------------------------------------------------------------------
@@ -184,6 +222,10 @@ class LlmConfig(_Base):
     #: 512-token budget can be consumed entirely by reasoning and return empty text.
     max_tokens: Annotated[int, Field(ge=16, le=8192)] = 1024
     context_length: Annotated[int, Field(ge=512)] = 8192
+    #: Consume the reply token by token and start speaking the first sentence while the
+    #: rest is still being written (priority.md P1-1). Set to false to go back to
+    #: "wait for the whole answer, then speak" if a server mishandles SSE.
+    stream: bool = True
     #: Safety valve for the tool-calling loop.
     max_tool_rounds: Annotated[int, Field(ge=1, le=20)] = 4
     #: Nemotron sometimes emits an empty ``<think></think>`` and stops without

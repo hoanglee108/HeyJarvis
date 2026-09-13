@@ -24,12 +24,16 @@ import numpy as np
 
 from .config import AudioConfig
 from .logging_setup import get_logger
+from .vad import INT16_MAX, EnergyGate, SpeechGate, frame_rms
 
 log = get_logger("jarvis.audio")
 
-INT16_MAX = 32768.0
 #: openWakeWord operates on 80 ms frames.
 FRAME_SAMPLES = 1280
+
+#: Backwards-compatible name. The implementation lives in :mod:`jarvis.vad` so the
+#: speech gates can use it without importing this module (which imports them).
+rms = frame_rms
 
 
 class AudioError(RuntimeError):
@@ -110,16 +114,6 @@ def _resample(samples: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
         src_x = np.linspace(0.0, 1.0, samples.size, endpoint=False)
         dst_x = np.linspace(0.0, 1.0, target_len, endpoint=False)
         return np.interp(dst_x, src_x, samples.astype(np.float32)).astype(np.float32)
-
-
-def rms(frame: np.ndarray) -> float:
-    """Root-mean-square of an int16 or float frame, normalised to 0..1."""
-    if frame.size == 0:
-        return 0.0
-    data = frame.astype(np.float32)
-    if np.issubdtype(frame.dtype, np.integer):
-        data /= INT16_MAX
-    return float(np.sqrt(np.mean(np.square(data))))
 
 
 # --------------------------------------------------------------------------------------
@@ -313,14 +307,24 @@ def record_utterance(
     mic: MicStream,
     config: AudioConfig,
     *,
-    speech_threshold: float,
+    speech_threshold: float | None = None,
+    gate: SpeechGate | None = None,
     pre_roll: np.ndarray | None = None,
 ) -> RecordingResult:
-    """Record until the speaker goes quiet (VAD-style energy gate).
+    """Record until the speaker goes quiet.
+
+    ``gate`` decides, frame by frame, whether someone is talking - see
+    :mod:`jarvis.vad`. Passing ``speech_threshold`` instead builds the original
+    energy gate, which keeps every existing caller and test working unchanged.
 
     Stop reasons: ``silence`` (normal), ``max_duration``, ``no_speech`` (nobody
     spoke within ``start_timeout_seconds``), ``mic_timeout``.
     """
+    if gate is None:
+        if speech_threshold is None:
+            raise ValueError("record_utterance cần 'gate' hoặc 'speech_threshold'")
+        gate = EnergyGate(speech_threshold)
+
     frame_seconds = FRAME_SAMPLES / config.sample_rate
     silence_frames_needed = max(1, int((config.silence_timeout_ms / 1000) / frame_seconds))
     max_frames = int(config.max_record_seconds / frame_seconds)
@@ -348,9 +352,8 @@ def record_utterance(
             reason = "mic_timeout"
             break
         frames_seen += 1
-        level = rms(frame)
-        peak = max(peak, level)
-        is_speech = level >= speech_threshold
+        is_speech = gate.is_speech(frame)
+        peak = max(peak, gate.last_level)
 
         if not started:
             if is_speech:
@@ -380,11 +383,11 @@ def record_utterance(
     ).astype(np.int16)
     result = RecordingResult(samples, config.sample_rate, reason, peak)
     log.info(
-        "Ghi âm xong: %.2fs, lý do=%s, peak_rms=%.4f (ngưỡng %.4f)",
+        "Ghi âm xong: %.2fs, lý do=%s, peak_rms=%.4f, gate=%s",
         result.duration,
         reason,
         peak,
-        speech_threshold,
+        gate.describe(),
     )
     return result
 
